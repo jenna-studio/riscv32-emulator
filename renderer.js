@@ -866,15 +866,24 @@ async function sendCommand(command) {
         if (result.ok) {
             terminal.writeln(`>> ${command}`);
 
-            // CPUlator-style command processing
+            // CPUlator-style command processing - sync all panels for execution commands
             if (
                 command === "s" ||
                 command === "s1" ||
                 command === "s100" ||
                 command === "c" ||
+                command === "r" ||
                 command.startsWith("stepi")
             ) {
-                await updateProgramStatus();
+                // Use the comprehensive sync function for all execution commands
+                await updateAfterExecution(command);
+
+                // For step commands, also switch to registers panel to show changes
+                if (command === "s1" || command === "s" || command.startsWith("stepi")) {
+                    setTimeout(() => {
+                        switchToPanel("registers");
+                    }, 200);
+                }
             }
 
             // Handle register display commands
@@ -1153,6 +1162,11 @@ function setupButtonHandlers() {
                 showNotification("Emulator running - ready for debugging!", "success");
                 await syncBreakpoints();
                 ideState.emulatorRunning = true;
+
+                // Sync all panels after loading
+                setTimeout(async () => {
+                    await syncAllPanels("compile and load");
+                }, 300);
             } else {
                 terminal.writeln(`❌ Error: ${runRes.error || "Unknown error"}`);
                 showNotification(`Failed to load assembly: ${runRes.error}`, "error");
@@ -1177,6 +1191,11 @@ function setupButtonHandlers() {
             showNotification("Assembly reloaded!", "success");
             await syncBreakpoints();
             ideState.emulatorRunning = true;
+
+            // Sync all panels after reload
+            setTimeout(async () => {
+                await syncAllPanels("reload");
+            }, 300);
         } else {
             showNotification("Failed to reload assembly", "error");
             ideState.emulatorRunning = false;
@@ -1457,11 +1476,26 @@ function setupButtonHandlers() {
     });
 
     document.querySelectorAll("[data-cmd]").forEach((btn) => {
-        btn.addEventListener("click", () => {
+        btn.addEventListener("click", async () => {
             const cmd = btn.getAttribute("data-cmd");
             if (cmd === "q") {
                 // Use the same logic as the main stop button
                 document.getElementById("stop").click();
+            } else if (cmd === "s1") {
+                // Use custom smart step for single step
+                await smartStep();
+            } else if (cmd === "info registers") {
+                // VIEW panel: Registers button
+                await handleViewRegisters();
+            } else if (cmd === "list") {
+                // VIEW panel: Source button
+                await handleViewSource();
+            } else if (cmd === "disassemble") {
+                // VIEW panel: Disassembly button
+                await handleViewDisassembly();
+            } else if (cmd === "info program") {
+                // VIEW panel: Status button
+                await handleViewStatus();
             } else {
                 sendCommand(cmd);
             }
@@ -1471,14 +1505,379 @@ function setupButtonHandlers() {
     console.log("✅ Button handlers set up");
 }
 
+// Central synchronization function to update all panels
+async function syncAllPanels(reason = "update") {
+    try {
+        console.log(`🔄 Syncing all panels (${reason})...`);
+
+        // Get all current state information in parallel for better performance
+        const [registersResult, listResult, pcResult, programResult] = await Promise.all([
+            window.api.sendCmd("info registers").catch((e) => ({ ok: false, error: e.message })),
+            window.api.sendCmd("list").catch((e) => ({ ok: false, error: e.message })),
+            window.api.sendCmd("info registers pc").catch((e) => ({ ok: false, error: e.message })),
+            window.api.sendCmd("info program").catch((e) => ({ ok: false, error: e.message })),
+        ]);
+
+        // Update registers panel
+        if (registersResult.ok) {
+            parseEmulatorOutputForTrace(registersResult.output);
+            updateRegistersFromCurrentValues();
+        }
+
+        // Update source panel
+        if (listResult.ok) {
+            updateSourceDisplay();
+            // Also update current line highlighting
+            const currentLine = parseCurrentLineFromList(listResult.output);
+            if (currentLine) {
+                currentExecutionLine = currentLine.lineNumber;
+            }
+        }
+
+        // Update disassembly panel with current PC context
+        if (pcResult.ok) {
+            const pcMatch = pcResult.output.match(/pc\s*=?\s*0x([0-9a-fA-F]+)/);
+            if (pcMatch) {
+                const pcAddr = pcMatch[1];
+                const disasmResult = await window.api
+                    .sendCmd(`disassemble 0x${pcAddr}`)
+                    .catch((e) => ({ ok: false }));
+                if (disasmResult.ok) {
+                    updateDisassemblyDisplay(disasmResult.output, pcAddr);
+                }
+            }
+        }
+
+        // Update statistics panel
+        if (registersResult.ok || pcResult.ok) {
+            updatePerformanceCounters();
+            updateInstructionTypeStats();
+        }
+
+        // Update memory panel if it was previously used
+        const memoryAddr = document.getElementById("memoryAddr")?.value;
+        if (memoryAddr && memoryAddr.trim()) {
+            const memoryLen = document.getElementById("memoryLen")?.value || "64";
+            const memResult = await window.api
+                .sendCmd(`x/${memoryLen}xb ${memoryAddr}`)
+                .catch((e) => ({ ok: false }));
+            if (memResult.ok) {
+                updateMemoryDisplay(memResult.output);
+            }
+        }
+
+        // Update symbols panel
+        const symbolResult = await window.api.sendCmd("info symbols").catch((e) => ({ ok: false }));
+        if (symbolResult.ok) {
+            updateSymbolsDisplay(symbolResult.output);
+        }
+
+        // Update call stack panel
+        const stackResult = await window.api.sendCmd("info stack").catch((e) => ({ ok: false }));
+        if (stackResult.ok) {
+            updateCallStackDisplay(stackResult.output);
+        }
+
+        // Update breakpoint display
+        await updateBreakpointDisplay();
+
+        console.log(`✅ All panels synced (${reason})`);
+    } catch (error) {
+        console.error("Error syncing panels:", error);
+        terminal.writeln(`⚠️  Panel sync warning: ${error.message}`);
+    }
+}
+
+// Enhanced update function for execution commands
+async function updateAfterExecution(commandType = "execution") {
+    await updateProgramStatus();
+
+    // Small delay to let the emulator settle
+    setTimeout(async () => {
+        await syncAllPanels(commandType);
+    }, 100);
+}
+
+// VIEW panel button handlers
+async function handleViewRegisters() {
+    try {
+        terminal.writeln(">> Refreshing registers view...");
+
+        // Switch to registers panel first
+        switchToPanel("registers");
+
+        // Then sync all panels for comprehensive update
+        await syncAllPanels("view registers");
+
+        terminal.writeln("✅ All panels synced from registers view");
+    } catch (error) {
+        terminal.writeln(`❌ Error updating registers: ${error.message}`);
+    }
+}
+
+async function handleViewSource() {
+    try {
+        terminal.writeln(">> Refreshing source view...");
+
+        // Switch to source panel first
+        switchToPanel("source");
+
+        // Then sync all panels for comprehensive update
+        await syncAllPanels("view source");
+
+        terminal.writeln("✅ All panels synced from source view");
+    } catch (error) {
+        terminal.writeln(`❌ Error updating source: ${error.message}`);
+    }
+}
+
+async function handleViewDisassembly() {
+    try {
+        terminal.writeln(">> Refreshing disassembly view...");
+
+        // Switch to disassembly panel first
+        switchToPanel("disassembly");
+
+        // Then sync all panels for comprehensive update
+        await syncAllPanels("view disassembly");
+
+        terminal.writeln("✅ All panels synced from disassembly view");
+    } catch (error) {
+        terminal.writeln(`❌ Error updating disassembly: ${error.message}`);
+    }
+}
+
+async function handleViewStatus() {
+    try {
+        terminal.writeln(">> Refreshing program status...");
+
+        // Switch to statistics panel first (closest to status)
+        switchToPanel("statistics");
+
+        // Then sync all panels for comprehensive update
+        await syncAllPanels("view status");
+
+        terminal.writeln("✅ All panels synced from status view");
+    } catch (error) {
+        terminal.writeln(`❌ Error updating status: ${error.message}`);
+    }
+}
+
+// Smart step function that skips comments and empty lines
+async function smartStep() {
+    let maxSteps = 20; // Prevent infinite loops
+    let stepsExecuted = 0;
+    let lastExecutableLine = null;
+
+    // Get initial position
+    const initialListResult = await window.api.sendCmd("list");
+    let initialLine = null;
+    if (initialListResult.ok) {
+        initialLine = parseCurrentLineFromList(initialListResult.output);
+    }
+
+    while (stepsExecuted < maxSteps) {
+        // Execute one instruction step
+        const result = await window.api.sendCmd("s1");
+        if (!result.ok) {
+            terminal.writeln(`Step failed: ${result.error || "Unknown error"}`);
+            return;
+        }
+        stepsExecuted++;
+
+        // Get the current line info
+        const listResult = await window.api.sendCmd("list");
+        if (!listResult.ok) {
+            break;
+        }
+
+        // Parse the current source line from the list output
+        const currentSourceLine = parseCurrentLineFromList(listResult.output);
+        if (currentSourceLine) {
+            // Check if we've moved to a different line
+            const differentLine =
+                !initialLine || currentSourceLine.lineNumber !== initialLine.lineNumber;
+
+            if (differentLine && isExecutableLine(currentSourceLine)) {
+                // We've hit an executable line on a different line, stop stepping
+                terminal.writeln(
+                    `>> Smart Step (to line ${
+                        currentSourceLine.lineNumber
+                    }: "${currentSourceLine.content.substring(0, 50)}${
+                        currentSourceLine.content.length > 50 ? "..." : ""
+                    }")`
+                );
+                lastExecutableLine = currentSourceLine;
+                break;
+            }
+        }
+
+        // Small delay to prevent overwhelming the system
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    if (stepsExecuted >= maxSteps) {
+        terminal.writeln(
+            `>> Smart Step completed (${stepsExecuted} instruction steps, hit max limit)`
+        );
+    } else if (lastExecutableLine) {
+        terminal.writeln(`>> Smart Step completed (${stepsExecuted} instruction steps)`);
+    }
+
+    // Update program status and sync all panels
+    await updateAfterExecution("smart step");
+
+    // Switch to registers panel to show the user the changes
+    setTimeout(() => {
+        switchToPanel("registers");
+    }, 200);
+}
+
+// Parse current line information from 'list' command output
+function parseCurrentLineFromList(listOutput) {
+    const lines = listOutput.split("\n");
+    for (const line of lines) {
+        // Look for lines that start with line numbers and contain the current position marker
+        if (line.match(/^\s*\d+\s*\*/)) {
+            const match = line.match(/^\s*(\d+)\s*\*?\s*(.*)/);
+            if (match) {
+                return {
+                    lineNumber: parseInt(match[1]),
+                    content: match[2].trim(),
+                };
+            }
+        }
+    }
+    return null;
+}
+
+// Check if a line contains executable code (not comment or empty)
+function isExecutableLine(lineInfo) {
+    if (!lineInfo || !lineInfo.content) return false;
+
+    const content = lineInfo.content.trim();
+
+    // Empty line
+    if (content.length === 0) return false;
+
+    // Comment line (starts with # or ; or //)
+    if (content.match(/^\s*[#;]/) || content.match(/^\s*\/\//)) return false;
+
+    // Label only (ends with colon and nothing else meaningful except maybe comments)
+    if (content.match(/^\s*\w+\s*:\s*(?:[#;\/].*)?$/)) return false;
+
+    // Assembly directive only (.text, .data, .section, etc.)
+    if (content.match(/^\s*\.[a-zA-Z_][a-zA-Z0-9_]*(\s|$)/)) return false;
+
+    // Assembler macro or function definitions
+    if (content.match(/^\s*\.macro\s|^\s*\.func\s|^\s*\.endfunc\s|^\s*\.endm\s/)) return false;
+
+    // Other common assembler directives
+    if (content.match(/^\s*\.(?:align|globl|global|weak|size|type|set|equ|equiv)\s/)) return false;
+
+    // RISC-V specific executable instructions (basic check)
+    // This includes arithmetic, logical, memory, branch, and jump instructions
+    if (content.match(/^\s*\w+\s+/)) {
+        const instruction = content.match(/^\s*(\w+)\s/)[1].toLowerCase();
+        // Common RISC-V instruction patterns
+        const riscvInstructions = [
+            // Arithmetic
+            "add",
+            "addi",
+            "sub",
+            "mul",
+            "div",
+            "rem",
+            // Logical
+            "and",
+            "andi",
+            "or",
+            "ori",
+            "xor",
+            "xori",
+            "sll",
+            "slli",
+            "srl",
+            "srli",
+            "sra",
+            "srai",
+            // Memory
+            "lb",
+            "lh",
+            "lw",
+            "lbu",
+            "lhu",
+            "sb",
+            "sh",
+            "sw",
+            // Branch
+            "beq",
+            "bne",
+            "blt",
+            "bge",
+            "bltu",
+            "bgeu",
+            // Jump
+            "jal",
+            "jalr",
+            "j",
+            // Compare
+            "slt",
+            "slti",
+            "sltu",
+            "sltiu",
+            // System
+            "ecall",
+            "ebreak",
+            "fence",
+            // Pseudo-instructions
+            "mv",
+            "li",
+            "la",
+            "nop",
+            "ret",
+            "call",
+            "tail",
+        ];
+
+        if (riscvInstructions.includes(instruction)) {
+            return true;
+        }
+    }
+
+    // If we can't identify it as a directive or comment, and it has some content,
+    // treat it as potentially executable
+    return content.length > 0;
+}
+
+// Function to switch to a specific panel
+function switchToPanel(panelName) {
+    const panelTabs = document.querySelector(".panel-tabs");
+    if (!panelTabs) return;
+
+    const targetButton = panelTabs.querySelector(`[data-panel="${panelName}"]`);
+    if (!targetButton) return;
+
+    // Update tab buttons
+    panelTabs.querySelectorAll(".tab-btn").forEach((tab) => {
+        tab.classList.toggle("active", tab === targetButton);
+    });
+
+    // Update panels
+    const panelSelector = `${panelName}-panel`;
+    document.querySelectorAll(".panel-content .panel").forEach((panel) => {
+        panel.classList.toggle("active", panel.id === panelSelector);
+    });
+}
+
 // Source panel functionality
 function updateSourceDisplay() {
     const sourceView = document.getElementById("sourceView");
     if (!sourceView) return;
 
     // Get the current assembly file content from Monaco editor
-    if (typeof monaco !== "undefined" && editor) {
-        const sourceCode = editor.getValue();
+    if (typeof monaco !== "undefined" && monacoEditor) {
+        const sourceCode = monacoEditor.getValue();
         const lines = sourceCode.split("\n");
 
         let html = '<div class="source-lines">';

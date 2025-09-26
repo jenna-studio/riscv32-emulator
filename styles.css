@@ -1325,7 +1325,7 @@ body {
 }
 
 .register-item:hover {
-    background: var(--accent-coral);
+    background: var(--accent-mint);
     border-color: #d4c1ff;
     transform: translateY(-1px);
     box-shadow: 0 2px 8px rgba(100, 70, 200, 0.15);
@@ -1333,6 +1333,7 @@ body {
 
 .register-item.changed {
     background: var(--accent-purple);
+    border-color: var(--accent-mint);
     animation: register-highlight 2s ease-out;
 }
 
