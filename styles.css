@@ -366,7 +366,7 @@ body {
 
 .reg-name {
     font-weight: 600;
-    color: var(--accent-mint);
+    color: #9370db;
     min-width: 35px;
 }
 
@@ -378,8 +378,8 @@ body {
 }
 
 .reg-alias {
-    font-size: 10px;
-    color: var(--text-muted);
+    font-size: 11px;
+    color: #ff1493;
     font-style: italic;
 }
 
@@ -403,7 +403,7 @@ body {
     flex: 1;
     overflow-y: auto;
     font-family: "Fira Code", monospace;
-    font-size: 11px;
+    font-size: 12px;
     background: var(--bg-primary);
 }
 
@@ -451,6 +451,267 @@ body {
 
 .trace-instruction {
     color: var(--text-primary);
+}
+
+.trace-empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+/* Source Panel Styles */
+.source-container {
+    height: 100%;
+    background: var(--bg-primary);
+    overflow: hidden;
+}
+
+.source-view {
+    height: 100%;
+    overflow-y: auto;
+    font-family: "Fira Code", monospace;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.source-lines {
+    padding: 8px 0;
+}
+
+.source-line {
+    display: flex;
+    align-items: center;
+    padding: 2px 12px;
+    min-height: 16px;
+    border-left: 4px solid transparent;
+    cursor: pointer;
+}
+
+.source-line:hover {
+    background: var(--bg-secondary);
+}
+
+.source-line.current-line {
+    background: rgba(255, 255, 0, 0.1);
+    border-left-color: #ffd700;
+}
+
+.source-line.has-breakpoint {
+    border-left-color: #ff69b4;
+    background: rgba(255, 105, 180, 0.1);
+}
+
+.source-line.current-line.has-breakpoint {
+    border-left-color: #ff6b6b;
+    background: rgba(255, 107, 107, 0.15);
+}
+
+.source-line-number {
+    color: var(--text-secondary);
+    margin-right: 12px;
+    font-weight: 500;
+    user-select: none;
+    min-width: 40px;
+}
+
+.source-line-content {
+    color: var(--text-primary);
+    white-space: pre;
+    flex: 1;
+}
+
+.source-empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+/* Disassembly Panel Styles */
+.disassembly-container {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+.disassembly-controls {
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-light);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.disassembly-controls input {
+    padding: 4px 8px;
+    border: 1px solid var(--border-light);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: "Fira Code", monospace;
+    font-size: 11px;
+}
+
+.disassembly-display {
+    flex: 1;
+    overflow: hidden;
+    font-family: "Fira Code", monospace;
+    font-size: 11px;
+}
+
+.disasm-header {
+    display: grid;
+    grid-template-columns: 100px 120px 1fr 100px;
+    gap: 12px;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-light);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.disasm-content {
+    height: calc(100% - 40px);
+    overflow-y: auto;
+    background: var(--bg-primary);
+}
+
+.disasm-line {
+    display: grid;
+    grid-template-columns: 100px 120px 1fr 100px;
+    gap: 12px;
+    padding: 4px 12px;
+    border-left: 3px solid transparent;
+    align-items: center;
+}
+
+.disasm-line:hover {
+    background: var(--bg-secondary);
+}
+
+.disasm-line.current-pc {
+    background: rgba(255, 215, 0, 0.1);
+    border-left-color: #ffd700;
+}
+
+.disasm-addr {
+    color: #489dba;
+    font-weight: 500;
+}
+
+.disasm-opcode {
+    color: var(--text-secondary);
+    font-family: "Fira Code", monospace;
+}
+
+.disasm-instr {
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.disasm-comment {
+    color: var(--text-secondary);
+    font-style: italic;
+    font-size: 10px;
+}
+
+.disasm-empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+/* Call Stack Panel Styles */
+.callstack-container {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+.callstack-controls {
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-light);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.callstack-info {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.callstack-display {
+    flex: 1;
+    overflow: hidden;
+    font-family: "Fira Code", monospace;
+    font-size: 11px;
+}
+
+.callstack-header {
+    display: grid;
+    grid-template-columns: 1fr 100px 100px 80px;
+    gap: 12px;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-light);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.callstack-content {
+    height: calc(100% - 40px);
+    overflow-y: auto;
+    background: var(--bg-primary);
+}
+
+.callstack-frame {
+    display: grid;
+    grid-template-columns: 1fr 100px 100px 80px;
+    gap: 12px;
+    padding: 6px 12px;
+    border-left: 3px solid transparent;
+    align-items: center;
+}
+
+.callstack-frame:hover {
+    background: var(--bg-secondary);
+}
+
+.callstack-frame.current-frame {
+    background: rgba(255, 215, 0, 0.1);
+    border-left-color: #ffd700;
+}
+
+.callstack-func {
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.callstack-addr {
+    color: #489dba;
+    font-family: "Fira Code", monospace;
+}
+
+.callstack-ret {
+    color: var(--text-secondary);
+    font-family: "Fira Code", monospace;
+}
+
+.callstack-line {
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+.callstack-empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-style: italic;
 }
 
 /* Enhanced Memory Display */
@@ -591,6 +852,7 @@ body {
 /* Monaco editor tweaks */
 .monaco-editor .margin {
     border: none !important;
+    margin-right: 10px;
 }
 
 .monaco-editor .glyph-margin {
@@ -621,6 +883,10 @@ body {
 
 .monaco-editor .lines-content {
     border: none !important;
+}
+
+.view-lines.monaco-mouse-cursor-text {
+    margin-left: 10px;
 }
 
 .sidebar-actions {
@@ -752,8 +1018,27 @@ body {
 }
 
 .monaco-scrollable-element.editor-scrollable.vs.mac {
-    margin-left: 10px;
-    padding-right: 20px;
+    margin-left: 0;
+    padding-right: 0;
+}
+
+.monaco-scrollable-element.editor-scrollable .scrollbar.vertical {
+    width: 14px !important;
+}
+
+.monaco-scrollable-element.editor-scrollable .scrollbar.horizontal {
+    height: 14px !important;
+}
+
+.monaco-scrollable-element.editor-scrollable .scrollbar .slider {
+    border-radius: 7px;
+    background: var(--accent-purple);
+    opacity: 0.8;
+}
+
+.monaco-scrollable-element.editor-scrollable .scrollbar .slider:hover {
+    background: var(--accent-lavender);
+    opacity: 1;
 }
 
 .monaco-editor .sticky-widget-lines-scrollable {
@@ -825,13 +1110,13 @@ body {
 }
 
 .editor-container {
-    height: calc(100% - 60px);
+    height: calc(100% - 55px);
     overflow: hidden;
 }
 
 /* Monaco editor fills the editor area */
 .editor-container .monaco-editor {
-    height: 100%;
+    height: calc(100% - 10px);
     padding-bottom: 10px;
 }
 
@@ -887,7 +1172,7 @@ body {
 }
 
 .panel-content {
-    height: calc(100% - 50px);
+    height: calc(100% - 70px);
     position: relative;
 }
 
@@ -1028,26 +1313,26 @@ body {
 }
 
 .register-item {
-    background: var(--accent-lavender);
+    background: var(--accent-yellow);
     border: 1px solid var(--border-light);
     border-radius: 8px;
     padding: 8px;
     font-family: "Fira Code", Menlo, "SF Mono", "Roboto Mono", Consolas, monospace;
-    font-size: 11px;
+    font-size: 12px;
     cursor: pointer;
     position: relative;
     transition: all 0.2s ease;
 }
 
 .register-item:hover {
-    background: var(--accent-yellow);
+    background: var(--accent-coral);
     border-color: #d4c1ff;
     transform: translateY(-1px);
     box-shadow: 0 2px 8px rgba(100, 70, 200, 0.15);
 }
 
 .register-item.changed {
-    background: var(--accent-coral);
+    background: var(--accent-purple);
     animation: register-highlight 2s ease-out;
 }
 

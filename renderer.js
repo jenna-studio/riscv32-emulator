@@ -673,6 +673,14 @@ async function initEditor() {
         insertSpaces: true,
         renderWhitespace: "none",
         padding: { top: 12, bottom: 6, left: 8 },
+        scrollbar: {
+            vertical: "visible",
+            horizontal: "visible",
+            useShadows: false,
+            verticalScrollbarSize: 14,
+            horizontalScrollbarSize: 14,
+            arrowSize: 11,
+        },
     });
 
     monacoInstance.editor.setTheme("cotton-candy");
@@ -867,11 +875,6 @@ async function sendCommand(command) {
                 command.startsWith("stepi")
             ) {
                 await updateProgramStatus();
-
-                // Add to instruction trace
-                const currentPC = getCurrentPC();
-                const instruction = await getCurrentInstruction();
-                addToTrace(instruction, currentPC, currentRegisterValues);
             }
 
             // Handle register display commands
@@ -893,7 +896,7 @@ async function sendCommand(command) {
 }
 
 function getCurrentPC() {
-    // Extract PC from current state - this would need integration with emulator
+    // Extract PC from current register values
     return parseInt(currentRegisterValues["pc"] || "0", 16);
 }
 
@@ -903,17 +906,17 @@ async function getCurrentInstruction() {
         const result = await window.api.sendCmd("info program");
         if (result.ok && result.output) {
             // Parse the output to extract current instruction
-            const lines = result.output.split('\n');
+            const lines = result.output.split("\n");
             for (const line of lines) {
                 // Look for instruction format like "Next: addi x1, x0, 10"
-                if (line.includes('Next:')) {
-                    const instruction = line.replace('Next:', '').trim();
+                if (line.includes("Next:")) {
+                    const instruction = line.replace("Next:", "").trim();
                     if (instruction) return instruction;
                 }
                 // Also look for current PC instruction
-                if (line.includes('inst:') && line.includes('pc:')) {
+                if (line.includes("inst:") && line.includes("pc:")) {
                     // Extract instruction from debug output
-                    const parts = line.split('src line');
+                    const parts = line.split("src line");
                     if (parts.length > 1) {
                         // Try to get the instruction from source
                         return extractInstructionFromDebug(line);
@@ -923,7 +926,7 @@ async function getCurrentInstruction() {
         }
 
         // Fallback: try to get instruction from current PC by reading source
-        if (monacoEditor && currentRegisterValues['pc']) {
+        if (monacoEditor && currentRegisterValues["pc"]) {
             const currentLine = getCurrentSourceLine();
             if (currentLine) {
                 return parseInstructionFromSource(currentLine);
@@ -980,11 +983,11 @@ function parseInstructionFromSource(sourceLine) {
     if (!sourceLine) return "nop";
 
     // Clean up the source line (remove comments, extra whitespace)
-    let instruction = sourceLine.split('#')[0].trim(); // Remove comments
-    instruction = instruction.split('//')[0].trim(); // Remove C++ style comments
+    let instruction = sourceLine.split("#")[0].trim(); // Remove comments
+    instruction = instruction.split("//")[0].trim(); // Remove C++ style comments
 
     // Skip labels and directives
-    if (instruction.endsWith(':') || instruction.startsWith('.')) {
+    if (instruction.endsWith(":") || instruction.startsWith(".")) {
         return "nop";
     }
 
@@ -1108,28 +1111,56 @@ function setupButtonHandlers() {
 
         try {
             terminal.writeln("> Compiling and Loading...");
+
+            // Build step
             const buildRes = await window.api.buildEmu();
+
             if (buildRes.code !== 0) {
-                terminal.writeln("Build failed!");
-                terminal.writeln(buildRes.out);
+                terminal.writeln("❌ Build failed!");
+                terminal.writeln(buildRes.out || "No build output");
                 showNotification("Build failed!", "error");
                 ideState.emulatorRunning = false;
                 return;
             }
-            terminal.writeln("✓ Emulator built successfully");
+            if (buildRes.out && buildRes.out.includes("Nothing to be done")) {
+                terminal.writeln("✓ Emulator already built (up to date)");
+            } else {
+                terminal.writeln("✓ Emulator built successfully");
+                if (buildRes.out) {
+                    terminal.writeln(buildRes.out);
+                }
+            }
 
+            // Check if we have a file loaded
+            if (!asmPath) {
+                terminal.writeln("❌ No assembly file loaded");
+                showNotification("No assembly file loaded", "error");
+                ideState.emulatorRunning = false;
+                return;
+            }
+
+            // Run step
             const runRes = await window.api.runEmu(asmPath);
+
             if (runRes.ok) {
-                terminal.writeln("✅ Assembly loaded!");
-                showNotification("Assembly loaded!", "success");
+                terminal.writeln("✅ Assembly loaded and emulator started!");
+                terminal.writeln(
+                    "🎯 Ready for debugging - use Step Into, Continue, or send commands"
+                );
+                terminal.writeln(
+                    "💡 The emulator is now waiting for your input in step-by-step mode"
+                );
+                showNotification("Emulator running - ready for debugging!", "success");
                 await syncBreakpoints();
                 ideState.emulatorRunning = true;
             } else {
-                terminal.writeln(`Error: ${runRes.error}`);
-                showNotification("Failed to load assembly", "error");
+                terminal.writeln(`❌ Error: ${runRes.error || "Unknown error"}`);
+                showNotification(`Failed to load assembly: ${runRes.error}`, "error");
                 ideState.emulatorRunning = false;
             }
         } catch (error) {
+            console.error("Compile and load error:", error);
+            terminal.writeln(`❌ Unexpected error: ${error.message}`);
             showNotification(`Error: ${error.message}`, "error");
             ideState.emulatorRunning = false;
         } finally {
@@ -1154,7 +1185,7 @@ function setupButtonHandlers() {
     });
 
     document.getElementById("stop").addEventListener("click", async () => {
-        if (document.getElementById("stop").enabled) return;
+        if (document.getElementById("stop").disabled) return;
 
         const btn = document.getElementById("stop");
         const originalText = btn.innerHTML;
@@ -1378,17 +1409,32 @@ function setupButtonHandlers() {
     });
 
     // Disassembly refresh button
-    document.getElementById("disasmRefresh").addEventListener("click", () => {
+    document.getElementById("disasmRefresh").addEventListener("click", async () => {
         const addr = document.getElementById("disasmAddr").value.trim();
-        const count = document.getElementById("disasmCount").value.trim() || "10";
-        if (addr) {
-            sendCommand(`disassemble ${addr} ${count}`);
+        const count = document.getElementById("disasmCount").value.trim() || "20";
+        try {
+            const command = addr ? `disassemble ${addr}` : `disassemble`;
+            const result = await window.api.sendCmd(command);
+            if (result.ok) {
+                updateDisassemblyDisplay(result.output, addr, parseInt(count));
+                showNotification("Disassembly updated", "success");
+            }
+        } catch (error) {
+            terminal.writeln(`Error: ${error.message}`);
         }
     });
 
     // Callstack refresh button
-    document.getElementById("refreshCallstack").addEventListener("click", () => {
-        sendCommand("info stack");
+    document.getElementById("refreshCallstack").addEventListener("click", async () => {
+        try {
+            const result = await window.api.sendCmd("info stack");
+            if (result.ok) {
+                updateCallStackDisplay(result.output);
+                showNotification("Call stack refreshed", "success");
+            }
+        } catch (error) {
+            terminal.writeln(`Error: ${error.message}`);
+        }
     });
 
     // Add Enter key support for various input fields
@@ -1423,6 +1469,118 @@ function setupButtonHandlers() {
     });
 
     console.log("✅ Button handlers set up");
+}
+
+// Source panel functionality
+function updateSourceDisplay() {
+    const sourceView = document.getElementById("sourceView");
+    if (!sourceView) return;
+
+    // Get the current assembly file content from Monaco editor
+    if (typeof monaco !== "undefined" && editor) {
+        const sourceCode = editor.getValue();
+        const lines = sourceCode.split("\n");
+
+        let html = '<div class="source-lines">';
+        lines.forEach((line, index) => {
+            const lineNumber = index + 1;
+            const isCurrentLine = currentExecutionLine === lineNumber;
+            const hasBreakpoint = breakpoints.has(lineNumber);
+
+            html += `<div class="source-line ${isCurrentLine ? "current-line" : ""} ${
+                hasBreakpoint ? "has-breakpoint" : ""
+            }" data-line="${lineNumber}">`;
+            html += `<span class="source-line-number">${lineNumber
+                .toString()
+                .padStart(4, " ")}</span>`;
+            html += `<span class="source-line-content">${escapeHtml(line) || " "}</span>`;
+            html += "</div>";
+        });
+        html += "</div>";
+
+        sourceView.innerHTML = html;
+
+        // Scroll to current execution line
+        if (currentExecutionLine) {
+            const currentLineElement = sourceView.querySelector(
+                `[data-line="${currentExecutionLine}"]`
+            );
+            if (currentLineElement) {
+                currentLineElement.scrollIntoView({ behavior: "smooth", block: "center" });
+            }
+        }
+    } else {
+        sourceView.innerHTML =
+            '<div class="source-empty">No source code available. Load an assembly file to see the source.</div>';
+    }
+}
+
+// Helper function to escape HTML
+function escapeHtml(text) {
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Track current execution line
+let currentExecutionLine = null;
+
+// Disassembly panel functionality
+function updateDisassemblyDisplay(disasmOutput, startAddr, count) {
+    const disasmContent = document.getElementById("disasmContent");
+    if (!disasmContent) return;
+
+    let html = "";
+    const lines = disasmOutput.split("\n");
+
+    lines.forEach((line) => {
+        const trimmedLine = line.trim();
+        if (!trimmedLine) return;
+
+        // Parse disassembly line format: address: opcode instruction
+        const match = trimmedLine.match(/^([0-9a-fA-F]+):\s*([0-9a-fA-F\s]+)\s+(.+)$/);
+        if (match) {
+            const [, address, opcode, instruction] = match;
+            const addr = `0x${address}`;
+            const isCurrentPC = currentRegisterValues["pc"] === address;
+
+            html += `<div class="disasm-line ${isCurrentPC ? "current-pc" : ""}">
+                <span class="disasm-addr">${addr}</span>
+                <span class="disasm-opcode">${opcode.trim()}</span>
+                <span class="disasm-instr">${escapeHtml(instruction)}</span>
+                <span class="disasm-comment"></span>
+            </div>`;
+        } else if (trimmedLine.includes(":") && !trimmedLine.startsWith("Dump")) {
+            // Alternative format parsing
+            const parts = trimmedLine.split(":");
+            if (parts.length >= 2) {
+                const address = parts[0].trim();
+                const rest = parts[1].trim();
+                const addr = address.startsWith("0x") ? address : `0x${address}`;
+                const isCurrentPC = currentRegisterValues["pc"] === address.replace("0x", "");
+
+                html += `<div class="disasm-line ${isCurrentPC ? "current-pc" : ""}">
+                    <span class="disasm-addr">${addr}</span>
+                    <span class="disasm-opcode">--</span>
+                    <span class="disasm-instr">${escapeHtml(rest)}</span>
+                    <span class="disasm-comment"></span>
+                </div>`;
+            }
+        }
+    });
+
+    if (!html) {
+        html =
+            '<div class="disasm-empty">No disassembly available. Try entering a start address and refresh.</div>';
+    }
+
+    disasmContent.innerHTML = html;
+
+    // Scroll to current PC if visible
+    const currentPCElement = disasmContent.querySelector(".current-pc");
+    if (currentPCElement) {
+        currentPCElement.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
 }
 
 function formatRISCVAssembly(code) {
@@ -1460,10 +1618,61 @@ function formatRISCVAssembly(code) {
         .join("\n");
 }
 
+// Parse emulator output for trace information
+function parseEmulatorOutputForTrace(chunk) {
+    const lines = chunk.split("\n");
+
+    for (const line of lines) {
+        const trimmedLine = line.trim();
+
+        // Parse instruction execution info: [inst: 1 pc: 0, src line 4]
+        const instMatch = trimmedLine.match(/\[inst:\s*(\d+)\s+pc:\s*(\d+),\s*src line\s*(\d+)\]/);
+        if (instMatch) {
+            const [, instCount, pc, srcLine] = instMatch;
+
+            // Store the current execution context
+            currentRegisterValues["pc"] = parseInt(pc).toString(16);
+            performanceCounters.instructions = parseInt(instCount);
+
+            // Update current execution line and refresh source panel
+            currentExecutionLine = parseInt(srcLine);
+            updateSourceDisplay();
+        }
+
+        // Parse "Next:" instruction line
+        const nextMatch = trimmedLine.match(/^Next:\s*(.+)$/);
+        if (nextMatch) {
+            const instruction = nextMatch[1].trim();
+            const pc = currentRegisterValues["pc"] ? parseInt(currentRegisterValues["pc"], 16) : 0;
+
+            // Add to trace and analyze instruction type
+            addToTrace(instruction, pc, { ...currentRegisterValues });
+            analyzeInstructionType(instruction);
+        }
+
+        // Parse register changes: >> rf[x02] 0 -> 10000
+        const regMatch = trimmedLine.match(
+            /^>>\s*rf\[(\w+)\]\s*[0-9a-fA-Fx]+\s*->\s*([0-9a-fA-Fx]+)$/
+        );
+        if (regMatch) {
+            const [, regName, newValue] = regMatch;
+            // Convert to hex string for consistency
+            const hexValue = parseInt(newValue, newValue.startsWith("0x") ? 16 : 10).toString(16);
+            currentRegisterValues[regName] = hexValue;
+
+            // Update registers display automatically
+            updateRegistersFromCurrentValues();
+        }
+    }
+}
+
 window.api.onOutput((chunk) => {
     if (terminal) {
         terminal.write(chunk);
     }
+
+    // Parse emulator output for trace information
+    parseEmulatorOutputForTrace(chunk);
 });
 
 // CPUlator-style register tracking
@@ -1879,6 +2088,42 @@ function updateRegisterDisplay(registerData) {
     }, 1500);
 }
 
+// Update registers display from current values
+function updateRegistersFromCurrentValues() {
+    const registersGrid = document.getElementById("registersGrid");
+    if (!registersGrid) return;
+
+    let html = '<div class="register-table">';
+
+    // Display all 32 RISC-V registers
+    for (let i = 0; i < 32; i++) {
+        const regName = `x${i}`;
+        const currentValue = currentRegisterValues[regName] || "0";
+        const previousValue = previousRegisterValues[regName];
+        const changed = previousValue !== undefined && previousValue !== currentValue;
+
+        html += `<div class="register-item ${changed ? "changed" : ""}">
+            <span class="reg-name">${regName}</span>
+            <span class="reg-value">0x${parseInt(currentValue, 16)
+                .toString(16)
+                .padStart(8, "0")
+                .toUpperCase()}</span>
+            <span class="reg-alias">${getRegisterAlias(i)}</span>
+        </div>`;
+
+        previousRegisterValues[regName] = currentValue;
+    }
+
+    html += "</div>";
+    registersGrid.innerHTML = html;
+
+    // Remove highlighting after animation
+    setTimeout(() => {
+        const changed = registersGrid.querySelectorAll(".changed");
+        changed.forEach((el) => el.classList.remove("changed"));
+    }, 1500);
+}
+
 // Get RISC-V register aliases
 function getRegisterAlias(regNum) {
     const aliases = {
@@ -1941,20 +2186,32 @@ function addToTrace(instruction, pc, registers) {
 
 function updateTraceDisplay() {
     const tracePanel = document.getElementById("trace-content");
+    const traceCount = document.getElementById("traceCount");
+
     if (!tracePanel) return;
+
+    // Update instruction count
+    if (traceCount) {
+        traceCount.textContent = instructionTrace.length;
+    }
 
     let html =
         '<div class="trace-header"><span>Cycle</span><span>PC</span><span>Instruction</span></div>';
 
-    // Show last 20 instructions
-    const recentTrace = instructionTrace.slice(-20);
-    recentTrace.forEach((entry, index) => {
-        html += `<div class="trace-entry ${index === recentTrace.length - 1 ? "current" : ""}">
-            <span class="trace-cycle">${entry.cycle}</span>
-            <span class="trace-pc">0x${entry.pc.toString(16).padStart(8, "0")}</span>
-            <span class="trace-instruction">${entry.instruction}</span>
-        </div>`;
-    });
+    if (instructionTrace.length === 0) {
+        html +=
+            '<div class="trace-empty">No instructions executed yet. Start the emulator and use step/run commands to see the trace.</div>';
+    } else {
+        // Show last 20 instructions
+        const recentTrace = instructionTrace.slice(-20);
+        recentTrace.forEach((entry, index) => {
+            html += `<div class="trace-entry ${index === recentTrace.length - 1 ? "current" : ""}">
+                <span class="trace-cycle">${entry.cycle}</span>
+                <span class="trace-pc">0x${entry.pc.toString(16).padStart(8, "0")}</span>
+                <span class="trace-instruction">${entry.instruction}</span>
+            </div>`;
+        });
+    }
 
     tracePanel.innerHTML = html;
     tracePanel.scrollTop = tracePanel.scrollHeight;
@@ -1963,14 +2220,116 @@ function updateTraceDisplay() {
 function updatePerformanceCounters() {
     performanceCounters.instructions++;
 
-    document.getElementById("statInstructions").textContent = performanceCounters.instructions;
-    document.getElementById("statCycles").textContent = performanceCounters.cycles;
-    document.getElementById("statPC").textContent = `0x${
-        currentRegisterValues["pc"] || "00000000"
-    }`;
-    document.getElementById("statSP").textContent = `0x${
-        currentRegisterValues["x2"] || "00000000"
-    }`;
+    // Update all statistics panel elements with better formatting
+    const statInstructions = document.getElementById("statInstructions");
+    if (statInstructions) {
+        statInstructions.textContent = performanceCounters.instructions.toLocaleString();
+    }
+
+    const statCycles = document.getElementById("statCycles");
+    if (statCycles) {
+        statCycles.textContent = performanceCounters.cycles.toLocaleString();
+    }
+
+    const statPC = document.getElementById("statPC");
+    if (statPC) {
+        const pcValue = currentRegisterValues["pc"] || "0";
+        statPC.textContent = `0x${parseInt(pcValue, 16)
+            .toString(16)
+            .padStart(8, "0")
+            .toUpperCase()}`;
+    }
+
+    const statSP = document.getElementById("statSP");
+    if (statSP) {
+        const spValue = currentRegisterValues["x2"] || currentRegisterValues["sp"] || "0";
+        statSP.textContent = `0x${parseInt(spValue, 16)
+            .toString(16)
+            .padStart(8, "0")
+            .toUpperCase()}`;
+    }
+
+    // Update instruction type counts
+    updateInstructionTypeStats();
+}
+
+// Track different instruction types
+let instructionStats = {
+    branches: 0,
+    memAccess: 0,
+    arithmetic: 0,
+    syscalls: 0,
+};
+
+function updateInstructionTypeStats() {
+    const statBranches = document.getElementById("statBranches");
+    if (statBranches) {
+        statBranches.textContent = instructionStats.branches.toLocaleString();
+    }
+
+    const statMemAccess = document.getElementById("statMemAccess");
+    if (statMemAccess) {
+        statMemAccess.textContent = instructionStats.memAccess.toLocaleString();
+    }
+
+    const statArithmetic = document.getElementById("statArithmetic");
+    if (statArithmetic) {
+        statArithmetic.textContent = instructionStats.arithmetic.toLocaleString();
+    }
+
+    const statSyscalls = document.getElementById("statSyscalls");
+    if (statSyscalls) {
+        statSyscalls.textContent = instructionStats.syscalls.toLocaleString();
+    }
+}
+
+// Analyze instruction to categorize it
+function analyzeInstructionType(instruction) {
+    if (!instruction) return;
+
+    const instr = instruction.toLowerCase().split(/\s+/)[0];
+
+    // Branch instructions
+    if (["beq", "bne", "blt", "bge", "bltu", "bgeu", "jal", "jalr"].includes(instr)) {
+        instructionStats.branches++;
+    }
+    // Load/Store instructions
+    else if (["lb", "lh", "lw", "lbu", "lhu", "sb", "sh", "sw"].includes(instr)) {
+        instructionStats.memAccess++;
+    }
+    // Arithmetic instructions
+    else if (
+        [
+            "add",
+            "addi",
+            "sub",
+            "mul",
+            "div",
+            "rem",
+            "and",
+            "andi",
+            "or",
+            "ori",
+            "xor",
+            "xori",
+            "sll",
+            "slli",
+            "srl",
+            "srli",
+            "sra",
+            "srai",
+            "slt",
+            "slti",
+            "sltu",
+            "sltiu",
+        ].includes(instr)
+    ) {
+        instructionStats.arithmetic++;
+    }
+    // System calls
+    else if (["ecall", "ebreak", "hcf"].includes(instr)) {
+        instructionStats.syscalls++;
+    }
 }
 
 async function initializeIDE() {
@@ -2061,13 +2420,23 @@ function initCPUlatorFeatures() {
             instructionTrace = [];
             performanceCounters.cycles = 0;
             performanceCounters.instructions = 0;
+
+            // Reset instruction stats
+            instructionStats.branches = 0;
+            instructionStats.memAccess = 0;
+            instructionStats.arithmetic = 0;
+            instructionStats.syscalls = 0;
+
             updateTraceDisplay();
             updatePerformanceCounters();
-            showNotification("Instruction trace cleared", "info");
+            showNotification("Instruction trace and statistics cleared", "info");
         }
 
         if (e.target && e.target.id === "searchInstruction") {
-            const searchTerm = document.getElementById("instructionSearch").value.trim().toLowerCase();
+            const searchTerm = document
+                .getElementById("instructionSearch")
+                .value.trim()
+                .toLowerCase();
             if (searchTerm) {
                 displayInstructionInfo(searchTerm);
             }
@@ -2080,6 +2449,15 @@ function initCPUlatorFeatures() {
             document.getElementById("searchInstruction").click();
         }
     });
+
+    // Initialize trace display
+    updateTraceDisplay();
+
+    // Initialize source display
+    updateSourceDisplay();
+
+    // Initialize registers display
+    updateRegistersFromCurrentValues();
 
     console.log("✅ Features initialized");
 }
@@ -2139,9 +2517,10 @@ function displayInstructionInfo(instructionName) {
 
     if (!instruction) {
         // Search for partial matches
-        const matches = Object.keys(riscvInstructions).filter(key =>
-            key.includes(instructionName.toLowerCase()) ||
-            riscvInstructions[key].name.toLowerCase().includes(instructionName.toLowerCase())
+        const matches = Object.keys(riscvInstructions).filter(
+            (key) =>
+                key.includes(instructionName.toLowerCase()) ||
+                riscvInstructions[key].name.toLowerCase().includes(instructionName.toLowerCase())
         );
 
         if (matches.length === 0) {
@@ -2155,11 +2534,15 @@ function displayInstructionInfo(instructionName) {
             detailsContainer.innerHTML = `
                 <div class="instruction-suggestions">
                     <h3>Did you mean one of these?</h3>
-                    ${matches.map(match => `
+                    ${matches
+                        .map(
+                            (match) => `
                         <div class="suggestion-item" onclick="displayInstructionInfo('${match}')">
                             <strong>${match}</strong> - ${riscvInstructions[match].name}
                         </div>
-                    `).join("")}
+                    `
+                        )
+                        .join("")}
                 </div>
             `;
         }
@@ -2235,6 +2618,73 @@ function addConditionalBreakpoint(lineNumber, condition = null) {
             : `Breakpoint set at line ${lineNumber}`,
         "success"
     );
+}
+
+// Call Stack panel functionality
+let callStack = [];
+
+function updateCallStackDisplay(stackOutput) {
+    const callstackContent = document.getElementById("callstackContent");
+    const callDepth = document.getElementById("callDepth");
+
+    if (!callstackContent) return;
+
+    // Parse stack information (basic implementation)
+    let html = "";
+    const lines = stackOutput.split("\n");
+    let stackEntries = [];
+
+    lines.forEach((line) => {
+        const trimmedLine = line.trim();
+        if (trimmedLine && !trimmedLine.startsWith("#") && trimmedLine.includes(":")) {
+            // Try to parse stack frame information
+            const match = trimmedLine.match(/(\w+)\s*@\s*(0x[0-9a-fA-F]+)(?:\s+.*line\s+(\d+))?/);
+            if (match) {
+                const [, funcName, address, srcLine] = match;
+                stackEntries.push({
+                    function: funcName || "unknown",
+                    address: address,
+                    returnAddr: address,
+                    srcLine: srcLine || "?",
+                });
+            }
+        }
+    });
+
+    if (stackEntries.length === 0) {
+        // If no parsed entries, create a basic current frame
+        const currentPC = currentRegisterValues["pc"] || "0";
+        stackEntries.push({
+            function: "main",
+            address: `0x${parseInt(currentPC, 16).toString(16).padStart(8, "0")}`,
+            returnAddr: "0x00000000",
+            srcLine: currentExecutionLine || "?",
+        });
+    }
+
+    callStack = stackEntries;
+
+    // Update call depth
+    if (callDepth) {
+        callDepth.textContent = callStack.length;
+    }
+
+    // Generate HTML
+    if (callStack.length === 0) {
+        html =
+            '<div class="callstack-empty"><i class="fas fa-info-circle"></i> No active function calls</div>';
+    } else {
+        callStack.forEach((frame, index) => {
+            html += `<div class="callstack-frame ${index === 0 ? "current-frame" : ""}">
+                <span class="callstack-func">${escapeHtml(frame.function)}</span>
+                <span class="callstack-addr">${frame.address}</span>
+                <span class="callstack-ret">${frame.returnAddr}</span>
+                <span class="callstack-line">${frame.srcLine}</span>
+            </div>`;
+        });
+    }
+
+    callstackContent.innerHTML = html;
 }
 
 document.addEventListener("DOMContentLoaded", initializeIDE);

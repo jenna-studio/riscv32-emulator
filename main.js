@@ -71,30 +71,71 @@ ipcMain.handle("build-emu", async () => {
             cwd: __dirname
         });
         let out = "";
-        proc.stdout.on("data", (d) => (out += d.toString()));
-        proc.stderr.on("data", (d) => (out += d.toString()));
-        proc.on("close", (code) => resolve({ code, out }));
+
+        proc.stdout.on("data", (d) => {
+            out += d.toString();
+        });
+
+        proc.stderr.on("data", (d) => {
+            out += d.toString();
+        });
+
+        proc.on("error", (error) => {
+            console.error("Build process error:", error);
+            out += `Process error: ${error.message}\n`;
+        });
+
+        proc.on("close", (code) => {
+            resolve({ code, out });
+        });
     });
 });
 
 ipcMain.handle("run-emu", async (_evt, asmPath) => {
     if (child) return { ok: false, error: "Emulator already running" };
-    const exe = path.join(__dirname, "obj", "emulator");
-    child = spawn(exe, [asmPath], { cwd: __dirname });
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
 
-    child.stdout.on("data", (chunk) => {
-        win.webContents.send("emu-output", chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-        win.webContents.send("emu-output", chunk);
-    });
-    child.on("close", (code) => {
-        win.webContents.send("emu-output", `\n[process exited with code ${code}]\n`);
-        child = null;
-    });
-    return { ok: true };
+    const exe = path.join(__dirname, "obj", "emulator");
+
+    // Check if the executable exists
+    if (!existsSync(exe)) {
+        const error = `Emulator executable not found: ${exe}`;
+        console.error("Emulator executable not found:", error);
+        return { ok: false, error };
+    }
+
+    // Check if the assembly file exists
+    if (!existsSync(asmPath)) {
+        const error = `Assembly file not found: ${asmPath}`;
+        console.error("Assembly file not found:", error);
+        return { ok: false, error };
+    }
+
+    try {
+        child = spawn(exe, [asmPath], { cwd: __dirname });
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+
+        child.stdout.on("data", (chunk) => {
+            win.webContents.send("emu-output", chunk);
+        });
+        child.stderr.on("data", (chunk) => {
+            win.webContents.send("emu-output", chunk);
+        });
+        child.on("error", (error) => {
+            console.error("Emulator process error:", error);
+            win.webContents.send("emu-output", `Error: ${error.message}\n`);
+            child = null;
+        });
+        child.on("close", (code) => {
+            win.webContents.send("emu-output", `\n[process exited with code ${code}]\n`);
+            child = null;
+        });
+
+        return { ok: true };
+    } catch (error) {
+        console.error("Failed to start emulator:", error);
+        return { ok: false, error: error.message };
+    }
 });
 
 ipcMain.handle("send-cmd", async (_evt, line) => {
