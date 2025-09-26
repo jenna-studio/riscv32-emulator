@@ -1,0 +1,54 @@
+{
+    "name": "rv32emulator-ide",
+    "version": "1.0.0",
+    "description": "RISC-V 32-bit Emulator IDE with Monaco Editor and xterm.js",
+    "author": "Your Name",
+    "private": true,
+    "main": "main.js",
+    "type": "module",
+    "scripts": {
+        "start": "electron .",
+        "build-emu": "make",
+        "dev": "electron . --enable-logging",
+        "build": "electron-builder",
+        "build:mac": "electron-builder --mac",
+        "build:win": "electron-builder --win",
+        "build:linux": "electron-builder --linux",
+        "dist": "npm run build",
+        "pack": "electron-builder --dir",
+        "postinstall": "electron-builder install-app-deps"
+    },
+    "build": {
+        "appId": "com.kmu.rv32emulator-ide",
+        "productName": "RISC-V Emulator IDE",
+        "directories": {
+            "output": "dist"
+        },
+        "files": [
+            "**/*",
+            "!dist/**/*",
+            "!node_modules/**/*",
+            "node_modules/monaco-editor/**/*",
+            "node_modules/@xterm/**/*"
+        ],
+        "mac": {
+            "category": "public.app-category.developer-tools",
+            "target": "dmg"
+        },
+        "win": {
+            "target": "nsis"
+        },
+        "linux": {
+            "target": "AppImage"
+        }
+    },
+    "devDependencies": {
+        "electron": "^32.0.0",
+        "electron-builder": "^25.1.8"
+    },
+    "dependencies": {
+        "@xterm/addon-fit": "^0.10.0",
+        "@xterm/xterm": "^5.5.0",
+        "monaco-editor": "^0.50.0"
+    }
+}
