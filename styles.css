@@ -379,7 +379,7 @@ body {
 
 .reg-alias {
     font-size: 11px;
-    color: #ff1493;
+    color: #015555;
     font-style: italic;
 }
 
@@ -388,6 +388,8 @@ body {
     height: 100%;
     display: flex;
     flex-direction: column;
+    min-height: 0;
+    overflow: scroll;
 }
 
 .trace-controls {
@@ -402,6 +404,8 @@ body {
 .trace-content {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 0;
     font-family: "Fira Code", monospace;
     font-size: 12px;
     background: var(--bg-primary);
@@ -1333,18 +1337,48 @@ body {
 
 .register-item.changed {
     background: var(--accent-purple);
-    border-color: var(--accent-mint);
+    border: 3px solid #ff6b35 !important;
     animation: register-highlight 2s ease-out;
+    transform: scale(1.05);
+    box-shadow: 0 0 15px rgba(255, 107, 53, 0.6);
+    z-index: 10;
+    position: relative;
+}
+
+.register-item.step-highlight {
+    border: 3px solid #00d4aa !important;
+    animation: step-pulse 1s ease-in-out;
+    transform: scale(1.08);
+    box-shadow: 0 0 20px rgba(0, 212, 170, 0.8);
+    z-index: 15;
+    position: relative;
 }
 
 @keyframes register-highlight {
     0% {
         background: var(--accent-coral);
         transform: scale(1.05);
+        border: 3px solid #ff6b35;
+        box-shadow: 0 0 15px rgba(255, 107, 53, 0.6);
     }
     100% {
         background: var(--accent-lavender);
         transform: scale(1);
+        border: 1px solid var(--border-light);
+        box-shadow: none;
+    }
+}
+
+@keyframes step-pulse {
+    0%,
+    100% {
+        border-color: #00d4aa;
+        box-shadow: 0 0 20px rgba(0, 212, 170, 0.8);
+    }
+    50% {
+        border-color: #00ff88;
+        box-shadow: 0 0 30px rgba(0, 255, 136, 1);
+        transform: scale(1.12);
     }
 }
 
@@ -1374,52 +1408,52 @@ body {
 /* Role-based coloring (backgrounds) */
 .register-item.reg-role-zero {
     background: linear-gradient(135deg, #e8f4fd 0%, #d6eaff 100%);
-    border-left: 3px solid #2196f3;
+    /* border-left: 3px solid #2196f3; */
 }
 
 .register-item.reg-role-ra {
     background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%);
-    border-left: 3px solid #ff9800;
+    /* border-left: 3px solid #ff9800; */
 }
 
 .register-item.reg-role-sp {
     background: linear-gradient(135deg, #f3e5f5 0%, #e1bee7 100%);
-    border-left: 3px solid #9c27b0;
+    /* border-left: 3px solid #9c27b0; */
 }
 
 .register-item.reg-role-gp {
     background: linear-gradient(135deg, #e0f2f1 0%, #b2dfdb 100%);
-    border-left: 3px solid #009688;
+    /* border-left: 3px solid #009688; */
 }
 
 .register-item.reg-role-tp {
-    background: linear-gradient(135deg, #fce4ec 0%, #f8bbd9 100%);
-    border-left: 3px solid #e91e63;
+    background: linear-gradient(135deg, #fff3e0 0%, #ffccbc 100%);
+    /* border-left: 3px solid #ff5722; */
 }
 
 .register-item.reg-role-fp {
     background: linear-gradient(135deg, #e8eaf6 0%, #c5cae9 100%);
-    border-left: 3px solid #3f51b5;
+    /* border-left: 3px solid #3f51b5; */
 }
 
 .register-item.reg-role-argret {
     background: linear-gradient(135deg, #e8f5e8 0%, #c8e6c9 100%);
-    border-left: 3px solid #4caf50;
+    /* border-left: 3px solid #4caf50; */
 }
 
 .register-item.reg-role-arg {
     background: linear-gradient(135deg, #fff8e1 0%, #ffecb3 100%);
-    border-left: 3px solid #ffc107;
+    /* border-left: 3px solid #ffc107; */
 }
 
 .register-item.reg-role-saved {
-    background: linear-gradient(135deg, #fff3e0 0%, #ffccbc 100%);
-    border-left: 3px solid #ff5722;
+    background: linear-gradient(135deg, #ffedf3 0%, #ffcde6 100%);
+    /* border-left: 3px solid #e91e63; */
 }
 
 .register-item.reg-role-temp {
     background: linear-gradient(135deg, #f1f8e9 0%, #dcedc8 100%);
-    border-left: 3px solid #8bc34a;
+    /* border-left: 3px solid #8bc34a; */
 }
 
 /* Registers legend */
@@ -1428,6 +1462,7 @@ body {
     flex-wrap: wrap;
     gap: 8px 12px;
     margin-bottom: 8px;
+    padding: 5px;
 }
 .legend-item {
     display: inline-flex;
@@ -1442,6 +1477,47 @@ body {
     border-radius: 4px;
     display: inline-block;
     border: 1px solid var(--border-light);
+}
+
+/* Legend swatches matching register role colors */
+.legend-swatch.reg-role-zero {
+    background: linear-gradient(135deg, #e8f4fd 0%, #d6eaff 100%);
+}
+
+.legend-swatch.reg-role-ra {
+    background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%);
+}
+
+.legend-swatch.reg-role-sp {
+    background: linear-gradient(135deg, #f3e5f5 0%, #e1bee7 100%);
+}
+
+.legend-swatch.reg-role-gp {
+    background: linear-gradient(135deg, #e0f2f1 0%, #b2dfdb 100%);
+}
+
+.legend-swatch.reg-role-tp {
+    background: linear-gradient(135deg, #fff3e0 0%, #ffccbc 100%);
+}
+
+.legend-swatch.reg-role-fp {
+    background: linear-gradient(135deg, #e8eaf6 0%, #c5cae9 100%);
+}
+
+.legend-swatch.reg-role-argret {
+    background: linear-gradient(135deg, #e8f5e8 0%, #c8e6c9 100%);
+}
+
+.legend-swatch.reg-role-arg {
+    background: linear-gradient(135deg, #fff8e1 0%, #ffecb3 100%);
+}
+
+.legend-swatch.reg-role-saved {
+    background: linear-gradient(135deg, #fce4ec 0%, #f8bbd9 100%);
+}
+
+.legend-swatch.reg-role-temp {
+    background: linear-gradient(135deg, #f1f8e9 0%, #dcedc8 100%);
 }
 
 .register-value.changed {
