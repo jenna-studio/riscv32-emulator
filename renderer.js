@@ -28,6 +28,8 @@ let ideState = {
     cFileAvailable: false,
 };
 
+let currentWorkspaceFolder = null;
+
 let previousRegisterValues = {};
 let currentRegisterValues = {};
 let instructionTrace = [];
@@ -782,6 +784,18 @@ async function initEditor() {
             "scrollbarSlider.background": "#8beffa42",
             "scrollbarSlider.hoverBackground": "#5ae9f942",
             "scrollbarSlider.activeBackground": "#5ae9f942",
+            "editorSuggestWidget.background": "#fff7fc",
+            "editorSuggestWidget.border": "#f3b7e0",
+            "editorSuggestWidget.foreground": "#7b68ee",
+            "editorSuggestWidget.highlightForeground": "#ff69b4",
+            "editorSuggestWidget.selectedBackground": "#fdd7ef",
+            "editorSuggestWidget.selectedForeground": "#2e223f",
+            "editorSuggestWidget.focusHighlightForeground": "#a855c1",
+            "editorSuggestWidget.iconForeground": "#c084fc",
+            "editorSuggestWidget.selectedIconForeground": "#7c3aed",
+            "editorSuggestWidgetStatus.foreground": "#8e7ba5",
+            "editorHoverWidget.foreground": "#493966",
+            "editorHoverWidget.border": "#f3b7e0",
         },
     });
 
@@ -802,7 +816,7 @@ async function initEditor() {
         tabSize: 4,
         insertSpaces: true,
         renderWhitespace: "none",
-        padding: { top: 12, bottom: 6, left: 8 },
+        padding: { top: 12, bottom: 6, left: 10 },
         scrollbar: {
             vertical: "visible",
             horizontal: "visible",
@@ -889,6 +903,12 @@ async function loadFile(filePath) {
 
                 const editorTitle = document.getElementById("editorTitle");
 
+                // Reset emulator state for clean file switching
+                await resetEmulatorState();
+
+                // Set the asmPath for the new file
+                asmPath = filePath;
+
                 if (fileName.endsWith(".s")) {
                     setModelContent("assembly", content, true);
                     setModelContent("c", "");
@@ -932,7 +952,7 @@ async function saveFile() {
         await window.api.saveFile(asmPath, content);
         ideState.editorDirty = false;
         updateButtonStates();
-        showNotification(`Saved: ${asmPath.split("/").pop()}`, "success");
+        showNotification(`Saved: ${asmPath ? asmPath.split("/").pop() : "file"}`, "success");
     } catch (error) {
         showNotification(`Failed to save file: ${error.message}`, "error");
     }
@@ -947,6 +967,9 @@ async function loadFilePair(fileName) {
     try {
         const assemblyContent = await window.api.readFile(mapping.assembly);
         const cContent = await window.api.readFile(mapping.c);
+
+        // Reset emulator state for clean file switching
+        await resetEmulatorState();
 
         asmPath = mapping.assembly;
         document.getElementById("asmLabel").textContent = fileName;
@@ -979,15 +1002,104 @@ async function loadExampleFiles() {
     if (!examplesList) return;
 
     examplesList.innerHTML = "";
-    Object.keys(fileMapping).forEach((fileName) => {
-        const item = document.createElement("div");
-        item.className = "file-item";
-        item.innerHTML = `<i class="fas fa-file-code"></i> ${fileName}`;
-        item.style.cursor = "pointer";
-        item.addEventListener("click", () => loadFilePair(fileName));
-        examplesList.appendChild(item);
-    });
-    console.log("✅ Example files loaded");
+
+    if (currentWorkspaceFolder) {
+        // Load files from workspace folder
+        await loadWorkspaceFiles();
+    } else {
+        // Load hardcoded examples
+        Object.keys(fileMapping).forEach((fileName) => {
+            const item = document.createElement("div");
+            item.className = "file-item";
+            item.innerHTML = `<i class="fas fa-file-code"></i> ${fileName}`;
+            item.style.cursor = "pointer";
+            item.addEventListener("click", () => loadFilePair(fileName));
+            examplesList.appendChild(item);
+        });
+        console.log("✅ Example files loaded");
+    }
+}
+
+async function loadWorkspaceFiles() {
+    const workspaceList = document.getElementById("workspaceList");
+    if (!workspaceList || !currentWorkspaceFolder) return;
+
+    // Clear workspace list
+    workspaceList.innerHTML = "";
+
+    try {
+        const fileTree = await window.api.listSFiles(currentWorkspaceFolder);
+
+        function renderFileTree(files, container, depth = 0) {
+            files.forEach((file) => {
+                const item = document.createElement("div");
+                item.style.paddingLeft = `${depth * 20}px`;
+
+                if (file.type === "directory") {
+                    item.className = "folder-item";
+                    item.innerHTML = `<i class="fas fa-folder"></i> ${file.name}`;
+                    item.style.cursor = "pointer";
+                    item.style.fontWeight = "bold";
+
+                    // Toggle folder expansion
+                    item.addEventListener("click", () => {
+                        const childContainer = item.nextElementSibling;
+                        if (
+                            childContainer &&
+                            childContainer.classList.contains("folder-children")
+                        ) {
+                            const isVisible = childContainer.style.display !== "none";
+                            childContainer.style.display = isVisible ? "none" : "block";
+                            const icon = item.querySelector("i");
+                            icon.className = isVisible ? "fas fa-folder" : "fas fa-folder-open";
+                        }
+                    });
+
+                    container.appendChild(item);
+
+                    // Create container for children
+                    if (file.children && file.children.length > 0) {
+                        const childContainer = document.createElement("div");
+                        childContainer.className = "folder-children";
+                        childContainer.style.display = "block";
+                        container.appendChild(childContainer);
+                        renderFileTree(file.children, childContainer, depth + 1);
+                    }
+                } else if (file.type === "file") {
+                    item.className = "file-item";
+                    item.innerHTML = `<i class="fas fa-file-code"></i> ${file.name}`;
+                    item.style.cursor = "pointer";
+
+                    item.addEventListener("click", async () => {
+                        try {
+                            await loadFile(file.path);
+                            showNotification(`Loaded: ${file.name}`, "success");
+                        } catch (error) {
+                            showNotification(
+                                `Failed to load ${file.name}: ${error.message}`,
+                                "error"
+                            );
+                        }
+                    });
+
+                    container.appendChild(item);
+                }
+            });
+        }
+
+        renderFileTree(fileTree, workspaceList);
+        console.log(`✅ Loaded ${fileTree.length} workspace files from ${currentWorkspaceFolder}`);
+    } catch (error) {
+        console.error("Failed to load workspace files:", error);
+        showNotification(`Failed to load workspace files: ${error.message}`, "error");
+    }
+}
+
+function clearWorkspaceFiles() {
+    const workspaceList = document.getElementById("workspaceList");
+    if (workspaceList) {
+        workspaceList.innerHTML = "";
+    }
 }
 
 async function sendCommand(command) {
@@ -999,6 +1111,7 @@ async function sendCommand(command) {
             // CPUlator-style command processing - sync all panels for execution commands
             if (
                 command === "s" ||
+                command === "s1" ||
                 command === "s100" ||
                 command === "c" ||
                 command === "r" ||
@@ -1413,11 +1526,15 @@ function setupButtonHandlers() {
     });
 
     // CPUlator-style memory display enhancement
-    function updateMemoryDisplay(memoryOutput, startAddr, length) {
+    function updateMemoryDisplay(memoryOutput) {
         const memoryDisplay = document.getElementById("memoryDisplay");
         if (!memoryDisplay) return;
 
         let html = "";
+        if (!memoryOutput) {
+            memoryDisplay.innerHTML = '<div class="empty-message">No memory data available</div>';
+            return;
+        }
         const lines = memoryOutput.split("\n");
 
         lines.forEach((line) => {
@@ -1513,6 +1630,7 @@ function setupButtonHandlers() {
     document.getElementById("chooseFolder").addEventListener("click", async () => {
         const folder = await window.api.pickFolder();
         if (folder) {
+            currentWorkspaceFolder = folder;
             showNotification(`Workspace folder set to: ${folder}`, "success");
             // Refresh file list
             document.getElementById("refreshFiles").click();
@@ -1535,15 +1653,8 @@ function setupButtonHandlers() {
 
     // Symbols refresh button
     document.getElementById("refreshSymbols").addEventListener("click", async () => {
-        try {
-            const result = await enqueueEmulatorCommand("info symbols");
-            if (result.ok) {
-                updateSymbolsDisplay(result.output);
-                showNotification("Symbols refreshed", "success");
-            }
-        } catch (error) {
-            showNotification("Failed to refresh symbols", "error");
-        }
+        await refreshSymbolsPanel();
+        showNotification("Symbols refreshed", "success");
     });
 
     // Disassembly refresh button
@@ -1554,7 +1665,7 @@ function setupButtonHandlers() {
             const command = addr ? `disassemble ${addr}` : `disassemble`;
             const result = await enqueueEmulatorCommand(command);
             if (result.ok) {
-                updateDisassemblyDisplay(result.output, addr, parseInt(count));
+                updateDisassemblyDisplay(result.output);
                 showNotification("Disassembly updated", "success");
             }
         } catch (error) {
@@ -1564,15 +1675,8 @@ function setupButtonHandlers() {
 
     // Callstack refresh button
     document.getElementById("refreshCallstack").addEventListener("click", async () => {
-        try {
-            const result = await enqueueEmulatorCommand("info stack");
-            if (result.ok) {
-                updateCallStackDisplay(result.output);
-                showNotification("Call stack refreshed", "success");
-            }
-        } catch (error) {
-            terminal.writeln(`Error: ${error.message}`);
-        }
+        await refreshCallStackPanel();
+        showNotification("Call stack refreshed", "success");
     });
 
     // Add Enter key support for various input fields
@@ -1601,15 +1705,8 @@ function setupButtonHandlers() {
                 // Use the same logic as the main stop button
                 document.getElementById("stop").click();
             } else if (cmd === "s1") {
-                // Use custom smart step for single step
-                try {
-                    await smartStep();
-                } catch (error) {
-                    console.error("Smart step error:", error);
-                    terminal.writeln(`❌ Step Into failed: ${error.message}`);
-                    // Fallback to regular step command
-                    sendCommand("s");
-                }
+                // Step Into: use simple "s" command to execute one instruction
+                sendCommand("s");
             } else if (cmd === "info registers") {
                 // VIEW panel: Registers button
                 await handleViewRegisters();
@@ -1656,6 +1753,7 @@ async function syncAllPanels(reason = "update") {
                 currentExecutionLine = currentLine.lineNumber;
             }
             updateSourceDisplay();
+            highlightCurrentSourceLine();
         }
 
         if (!pcHex && currentRegisterValues["pc"]) {
@@ -1663,9 +1761,11 @@ async function syncAllPanels(reason = "update") {
         }
 
         if (pcHex) {
-            const disasmResult = await enqueueEmulatorCommand(`disassemble 0x${pcHex}`);
+            // Get broader disassembly context around current PC
+            const disasmResult = await enqueueEmulatorCommand(`disassemble 0x${pcHex},+20`);
             if (disasmResult.ok) {
-                updateDisassemblyDisplay(disasmResult.output, pcHex);
+                updateDisassemblyDisplay(disasmResult.output);
+                highlightCurrentInstructionInDisassembly(pcHex);
             }
         }
 
@@ -1678,17 +1778,27 @@ async function syncAllPanels(reason = "update") {
             }
         }
 
-        const symbolResult = await enqueueEmulatorCommand("info symbols");
-        if (symbolResult.ok) {
-            updateSymbolsDisplay(symbolResult.output);
+        // Update symbols with fallback
+        try {
+            await refreshSymbolsPanel();
+        } catch (error) {
+            console.error("Error refreshing symbols panel:", error);
+            terminal.writeln(`⚠️  Symbol panel warning: ${error.message}`);
         }
 
-        const stackResult = await enqueueEmulatorCommand("info stack");
-        if (stackResult.ok) {
-            updateCallStackDisplay(stackResult.output);
+        // Update call stack with fallback
+        try {
+            await refreshCallStackPanel();
+        } catch (error) {
+            console.error("Error refreshing call stack panel:", error);
+            terminal.writeln(`⚠️  Call stack panel warning: ${error.message}`);
         }
 
-        updateBreakpointDisplay();
+        try {
+            updateBreakpointDisplay();
+        } catch (error) {
+            console.error("Error updating breakpoint display:", error);
+        }
 
         console.log(`✅ All panels synced (${reason})`);
     } catch (error) {
@@ -1709,9 +1819,6 @@ async function handleViewRegisters() {
     try {
         terminal.writeln(">> Refreshing registers view...");
 
-        // Switch to registers panel first
-        switchToPanel("registers");
-
         // Then sync all panels for comprehensive update
         await syncAllPanels("view registers");
 
@@ -1724,9 +1831,6 @@ async function handleViewRegisters() {
 async function handleViewSource() {
     try {
         terminal.writeln(">> Refreshing source view...");
-
-        // Switch to source panel first
-        switchToPanel("source");
 
         // Then sync all panels for comprehensive update
         await syncAllPanels("view source");
@@ -1741,13 +1845,16 @@ async function handleViewDisassembly() {
     try {
         terminal.writeln(">> Refreshing disassembly view...");
 
-        // Switch to disassembly panel first
-        switchToPanel("disassembly");
-
-        // Then sync all panels for comprehensive update
-        await syncAllPanels("view disassembly");
-
-        terminal.writeln("✅ All panels synced from disassembly view");
+        // Try to get disassembly directly if emulator is running
+        const disasmResult = await enqueueEmulatorCommand("disassemble");
+        if (disasmResult.ok && disasmResult.output) {
+            updateDisassemblyDisplay(disasmResult.output);
+            terminal.writeln("✅ Disassembly view updated");
+        } else {
+            // Fallback to full panel sync
+            await syncAllPanels("view disassembly");
+            terminal.writeln("✅ All panels synced from disassembly view");
+        }
     } catch (error) {
         terminal.writeln(`❌ Error updating disassembly: ${error.message}`);
     }
@@ -1756,9 +1863,6 @@ async function handleViewDisassembly() {
 async function handleViewStatus() {
     try {
         terminal.writeln(">> Refreshing program status...");
-
-        // Switch to statistics panel first (closest to status)
-        switchToPanel("statistics");
 
         // Then sync all panels for comprehensive update
         await syncAllPanels("view status");
@@ -1769,63 +1873,7 @@ async function handleViewStatus() {
     }
 }
 
-// Smart step function with enhanced register highlighting and full panel sync
-async function smartStep() {
-    terminal.writeln(">> Step Into...");
-
-    try {
-        // Store previous register values for comparison
-        const previousValues = { ...currentRegisterValues };
-
-        // Execute one instruction step
-        const result = await enqueueEmulatorCommand("s");
-        if (!result.ok) {
-            throw new Error(result.error || "Step command failed");
-        }
-
-        // Enhanced step visualization with sequential register highlighting
-        await enhancedStepVisualization();
-
-        // Update all panels comprehensively
-        await updateAfterExecution("step into");
-
-        // Highlight changed registers with borders
-        highlightChangedRegisters(previousValues);
-
-        // Synchronize all panels for step execution
-        await comprehensivePanelSync();
-
-        // Switch to registers panel with smooth transition
-        setTimeout(() => {
-            switchToPanel("registers");
-        }, 300);
-
-        terminal.writeln("✅ Step Into completed with full synchronization");
-    } catch (error) {
-        terminal.writeln(`❌ Step Into error: ${error.message}`);
-        throw error;
-    }
-}
-
-// Enhanced step visualization with sequential effects
-async function enhancedStepVisualization() {
-    // Add step highlight to all registers sequentially
-    const registerItems = document.querySelectorAll('.register-item');
-
-    for (let i = 0; i < registerItems.length; i++) {
-        registerItems[i].classList.add('step-highlight');
-
-        // Stagger the highlighting for visual effect
-        await new Promise(resolve => setTimeout(resolve, 50));
-
-        // Remove highlight after a short duration
-        setTimeout(() => {
-            registerItems[i].classList.remove('step-highlight');
-        }, 500);
-    }
-}
-
-// Highlight registers that changed with enhanced borders
+// Highlight registers that changed during step execution
 function highlightChangedRegisters(previousValues) {
     for (let i = 0; i < 32; i++) {
         const regName = `x${i}`;
@@ -1833,140 +1881,58 @@ function highlightChangedRegisters(previousValues) {
         const previousValue = previousValues[regName] || "0";
 
         if (previousValue !== currentValue) {
-            const registerElement = document.querySelector(`[data-register="x${i}"]`);
+            const registerElement = document.querySelector(`[data-register="${regName}"]`);
             if (registerElement) {
-                registerElement.classList.add('changed');
-
-                // Remove the changed class after animation completes
+                registerElement.classList.add("changed");
+                // Remove highlight after animation
                 setTimeout(() => {
-                    registerElement.classList.remove('changed');
-                }, 2500);
+                    registerElement.classList.remove("changed");
+                }, 2000);
             }
         }
     }
 }
 
-// Comprehensive panel synchronization for step operations
-async function comprehensivePanelSync() {
-    const syncPromises = [
-        // Core panels
-        updateRegistersFromCurrentValues(),
-        updateMemoryDisplay(),
-        updateSourceDisplay(),
-        updateDisassemblyDisplay(),
-        updateExecutionStatistics(),
-
-        // Advanced panels
-        updateSymbolTable(),
-        updateCallStack(),
-        updateTraceDisplay(),
-
-        // Additional state updates
-        updateProgramCounterDisplay(),
-        updateStackPointerDisplay(),
-        updateExecutionStatistics()
-    ];
-
-    // Execute all updates in parallel for better performance
-    await Promise.allSettled(syncPromises);
-
-    // Update execution indicators
-    updateExecutionIndicators();
-
-    terminal.writeln("🔄 All panels synchronized");
-}
-
-// Update execution indicators across all panels
-function updateExecutionIndicators() {
-    // Update PC indicators in all relevant panels
-    const currentPC = currentRegisterValues["pc"];
-    if (currentPC) {
-        const pcHex = "0x" + parseInt(currentPC, 16).toString(16).padStart(8, "0");
-
-        // Update source panel PC indicator
-        updateSourceDisplay();
-
-        // Update disassembly panel PC indicator
-        highlightCurrentDisassemblyLine(pcHex);
-
-        // Update call stack if needed
-        updateCallStackCurrentFrame();
-    }
-}
-
-// Update stack pointer display
-function updateStackPointerDisplay() {
-    const sp = currentRegisterValues["x2"] || currentRegisterValues["sp"];
-    if (sp) {
-        const spElement = document.querySelector('#statSP');
-        if (spElement) {
-            spElement.textContent = "0x" + parseInt(sp, 16).toString(16).padStart(8, "0").toUpperCase();
-        }
-    }
-}
-
-// Update program counter display
-function updateProgramCounterDisplay() {
+// Log step execution to trace panel
+function logStepToTrace() {
     const pc = currentRegisterValues["pc"];
     if (pc) {
-        const pcElement = document.querySelector('#statPC');
-        if (pcElement) {
-            pcElement.textContent = "0x" + parseInt(pc, 16).toString(16).padStart(8, "0").toUpperCase();
+        const pcHex = "0x" + parseInt(pc, 16).toString(16).padStart(8, "0").toUpperCase();
+        const instruction = `Step executed at PC: ${pcHex}`;
+
+        // Add to instruction trace
+        addToTrace(instruction, parseInt(pc, 16), { ...currentRegisterValues });
+
+        // Update trace display
+        updateTraceDisplay();
+    }
+}
+
+// Highlight current instruction in disassembly panel
+function highlightCurrentInstructionInDisassembly(pcHex) {
+    // Remove previous highlights
+    const disasmLines = document.querySelectorAll(".disasm-line");
+    disasmLines.forEach((line) => line.classList.remove("current-pc"));
+
+    // Find and highlight current instruction
+    const currentPCElement = document.querySelector(`[data-address="${pcHex}"]`);
+    if (currentPCElement) {
+        currentPCElement.classList.add("current-pc");
+    }
+}
+
+// Enhanced source panel highlighting
+function highlightCurrentSourceLine() {
+    // Remove previous highlights
+    const sourceLines = document.querySelectorAll(".source-line");
+    sourceLines.forEach((line) => line.classList.remove("current-pc"));
+
+    // Highlight current execution line
+    if (currentExecutionLine) {
+        const currentLineElement = document.querySelector(`[data-line="${currentExecutionLine}"]`);
+        if (currentLineElement) {
+            currentLineElement.classList.add("current-pc");
         }
-    }
-}
-
-// Update execution statistics
-function updateExecutionStatistics() {
-    // Update instruction count
-    const instrElement = document.querySelector('#statInstructions');
-    if (instrElement) {
-        instrElement.textContent = performanceCounters.instructions.toString();
-    }
-
-    // Update cycles
-    const cyclesElement = document.querySelector('#statCycles');
-    if (cyclesElement) {
-        cyclesElement.textContent = performanceCounters.cycles.toString();
-    }
-
-    // Update branch count
-    const branchElement = document.querySelector('#statBranches');
-    if (branchElement) {
-        branchElement.textContent = performanceCounters.branches.toString();
-    }
-
-    // Update memory access count
-    const memElement = document.querySelector('#statMemAccess');
-    if (memElement) {
-        memElement.textContent = performanceCounters.memoryAccesses.toString();
-    }
-
-    // Update arithmetic count
-    const arithElement = document.querySelector('#statArithmetic');
-    if (arithElement) {
-        arithElement.textContent = performanceCounters.arithmetic.toString();
-    }
-
-    // Update syscall count
-    const syscallElement = document.querySelector('#statSyscalls');
-    if (syscallElement) {
-        syscallElement.textContent = performanceCounters.syscalls.toString();
-    }
-}
-
-// Highlight current disassembly line (placeholder)
-function highlightCurrentDisassemblyLine(pcHex) {
-    // Implementation would update disassembly panel to highlight current PC
-    terminal.writeln(`🎯 PC updated to ${pcHex}`);
-}
-
-// Update call stack current frame (placeholder)
-function updateCallStackCurrentFrame() {
-    // Implementation would update call stack panel
-    const callstackContent = document.getElementById('callstackContent');
-    if (callstackContent) {
-        // Add current frame highlighting logic here
     }
 }
 
@@ -2040,6 +2006,7 @@ function findNearestExecutableLine(lineNumber) {
 
 // Parse current line information from 'list' command output
 function parseCurrentLineFromList(listOutput) {
+    if (!listOutput) return null;
     const lines = listOutput.split("\n");
     const entries = [];
 
@@ -2176,7 +2143,9 @@ function updateSourceDisplay() {
             html += `<span class="source-line-number">${lineNumber
                 .toString()
                 .padStart(4, " ")}</span>`;
-            html += `<span class="source-line-content">${escapeHtml(line) || " "}</span>`;
+            html += `<span class="source-line-content">${
+                highlightRiscVAssembly(line) || "&nbsp;"
+            }</span>`;
             html += "</div>";
         });
         html += "</div>";
@@ -2198,6 +2167,115 @@ function updateSourceDisplay() {
     }
 }
 
+// RISC-V Assembly syntax highlighting
+function highlightRiscVAssembly(line) {
+    if (!line.trim()) return "&nbsp;";
+
+    // RISC-V instruction patterns
+    const patterns = {
+        // Comments (starts with # or //)
+        comment: /^(\s*)(#.*|\/\/.*)$/,
+        // Labels (ends with colon)
+        label: /^(\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*(:)(.*)$/,
+        // Directives (starts with .)
+        directive: /^(\s*)(\.[a-zA-Z][a-zA-Z0-9_]*)\s*(.*)$/,
+        // Instructions with operands
+        instruction: /^(\s*)([a-zA-Z][a-zA-Z0-9_]*)\s+(.*)$/,
+        // Registers (x0-x31, zero, ra, sp, gp, tp, t0-t6, s0-s11, a0-a7)
+        register: /(x[0-9]+|zero|ra|sp|gp|tp|t[0-6]|s[0-9]|s1[01]|a[0-7]|fp)/g,
+        // Immediate values (numbers, hex)
+        immediate: /(-?0x[0-9a-fA-F]+|-?[0-9]+)/g,
+        // Memory operands
+        memory: /([0-9]+)\(([^)]+)\)/g,
+        // String literals
+        string: /"([^"\\]|\\.)*"/g,
+    };
+
+    let highlighted = line;
+
+    // Check for comment line
+    const commentMatch = highlighted.match(patterns.comment);
+    if (commentMatch) {
+        return `${commentMatch[1]}<span class="asm-comment">${escapeHtml(commentMatch[2])}</span>`;
+    }
+
+    // Check for label
+    const labelMatch = highlighted.match(patterns.label);
+    if (labelMatch) {
+        let remainingText = labelMatch[4] ? labelMatch[4].trim() : "";
+        let highlightedRemaining = "";
+
+        if (remainingText) {
+            // Check if the remaining text is a comment
+            if (remainingText.startsWith("#") || remainingText.startsWith("//")) {
+                highlightedRemaining = `<span class="asm-comment">${escapeHtml(
+                    remainingText
+                )}</span>`;
+            } else {
+                // Only recurse if it's not a comment
+                highlightedRemaining = highlightRiscVAssembly(remainingText);
+            }
+        }
+
+        return `${labelMatch[1]}<span class="asm-label">${escapeHtml(
+            labelMatch[2]
+        )}</span><span class="asm-punctuation">${labelMatch[3]}</span>${
+            remainingText ? " " + highlightedRemaining : ""
+        }`;
+    }
+
+    // Check for directive
+    const directiveMatch = highlighted.match(patterns.directive);
+    if (directiveMatch) {
+        let rest = directiveMatch[3];
+        rest = rest.replace(patterns.string, '<span class="asm-string">$&</span>');
+        rest = rest.replace(patterns.immediate, '<span class="asm-immediate">$&</span>');
+        return `${directiveMatch[1]}<span class="asm-directive">${escapeHtml(
+            directiveMatch[2]
+        )}</span> ${rest}`;
+    }
+
+    // Check for instruction
+    const instructionMatch = highlighted.match(patterns.instruction);
+    if (instructionMatch) {
+        let operands = instructionMatch[3];
+
+        // Highlight registers
+        operands = operands.replace(patterns.register, '<span class="asm-register">$&</span>');
+
+        // Highlight memory operands
+        operands = operands.replace(
+            patterns.memory,
+            '<span class="asm-immediate">$1</span>(<span class="asm-register">$2</span>)'
+        );
+
+        // Highlight immediate values that aren't already wrapped in spans
+        operands = operands.replace(
+            /\b(-?0x[0-9a-fA-F]+|-?[0-9]+)\b/g,
+            function (match, p1, offset, string) {
+                // Check if this number is already inside a span
+                const before = string.substring(0, offset);
+                const afterLastSpan = before.lastIndexOf("</span>");
+                const lastOpenSpan = before.lastIndexOf("<span");
+                if (lastOpenSpan > afterLastSpan) {
+                    return match; // Already inside a span
+                }
+                return `<span class="asm-immediate">${p1}</span>`;
+            }
+        );
+
+        // Highlight commas and other punctuation
+        operands = operands.replace(/([,()])/g, '<span class="asm-punctuation">$1</span>');
+
+        return `${instructionMatch[1]}<span class="asm-instruction">${escapeHtml(
+            instructionMatch[2]
+        )}</span> ${operands}`;
+    }
+
+    // Fallback for other lines
+    return escapeHtml(highlighted);
+}
+
 // Helper function to escape HTML
 function escapeHtml(text) {
     const div = document.createElement("div");
@@ -2208,12 +2286,127 @@ function escapeHtml(text) {
 // Track current execution line
 let currentExecutionLine = null;
 
+// Reset function for switching files - clears all emulator state
+async function resetEmulatorState() {
+    console.log("🔄 Resetting emulator state for new file...");
+
+    // Stop any running emulator
+    try {
+        await window.api.stopEmu();
+    } catch (error) {
+        // Ignore errors when stopping (emulator might not be running)
+    }
+
+    // Clear all execution state
+    currentExecutionLine = null;
+    previousRegisterValues = {};
+    currentRegisterValues = {};
+    instructionTrace = [];
+    callStack = [];
+
+    // Reset IDE state flags
+    ideState.emulatorRunning = false;
+
+    // Reset performance counters
+    performanceCounters = {
+        instructions: 0,
+        cycles: 0,
+        cacheHits: 0,
+        cacheMisses: 0,
+        branchPredictions: 0,
+        branchMispredictions: 0,
+    };
+
+    // Clear all panels
+    if (terminal) {
+        terminal.clear();
+    }
+
+    // Reset register panel
+    const registersContainer = document.getElementById("registers");
+    if (registersContainer) {
+        registersContainer.innerHTML = '<div class="no-registers">No register data available</div>';
+    }
+
+    // Reset memory panel
+    const memoryDisplay = document.getElementById("memoryDisplay");
+    if (memoryDisplay) {
+        memoryDisplay.innerHTML = '<div class="memory-empty">Memory not available</div>';
+    }
+
+    // Reset source panel
+    updateSourceDisplay();
+
+    // Reset disassembly panel
+    const disasmContent = document.getElementById("disasmContent");
+    if (disasmContent) {
+        disasmContent.innerHTML = '<div class="disasm-empty">No disassembly available</div>';
+    }
+
+    // Reset statistics panel
+    const statInstructions = document.getElementById("statInstructions");
+    const statCycles = document.getElementById("statCycles");
+    const statCacheHits = document.getElementById("statCacheHits");
+    const statCacheMisses = document.getElementById("statCacheMisses");
+    const statBranchPredictions = document.getElementById("statBranchPredictions");
+    const statBranchMispredictions = document.getElementById("statBranchMispredictions");
+
+    if (statInstructions) statInstructions.textContent = "0";
+    if (statCycles) statCycles.textContent = "0";
+    if (statCacheHits) statCacheHits.textContent = "0";
+    if (statCacheMisses) statCacheMisses.textContent = "0";
+    if (statBranchPredictions) statBranchPredictions.textContent = "0";
+    if (statBranchMispredictions) statBranchMispredictions.textContent = "0";
+
+    // Reset symbols panel
+    const symbolsContent = document.getElementById("symbolsContent");
+    if (symbolsContent) {
+        symbolsContent.innerHTML = '<div class="no-symbols">No symbols available</div>';
+    }
+
+    // Reset call stack panel
+    const callstackContent = document.getElementById("callstackContent");
+    const callDepth = document.getElementById("callDepth");
+    if (callstackContent) {
+        callstackContent.innerHTML =
+            '<div class="callstack-empty"><i class="fas fa-info-circle"></i> No active function calls</div>';
+    }
+    if (callDepth) {
+        callDepth.textContent = "0";
+    }
+
+    // Reset trace panel
+    const traceContent = document.getElementById("trace-content");
+    const traceCount = document.getElementById("traceCount");
+    if (traceContent) {
+        traceContent.innerHTML =
+            '<div class="trace-header"><span>Cycle</span><span>PC</span><span>Instruction</span></div><div class="trace-empty">No instructions executed yet. Start the emulator and use step/run commands to see the trace.</div>';
+    }
+    if (traceCount) {
+        traceCount.textContent = "0";
+    }
+
+    // Reset IDE state flags
+    ideState.built = false;
+    ideState.running = false;
+
+    // Update UI
+    updateButtonStates();
+
+    console.log("✅ Emulator state reset complete");
+    showNotification("IDE refreshed for new file", "info");
+}
+
 // Disassembly panel functionality
-function updateDisassemblyDisplay(disasmOutput, startAddr, count) {
+function updateDisassemblyDisplay(disasmOutput) {
     const disasmContent = document.getElementById("disasmContent");
     if (!disasmContent) return;
 
     let html = "";
+    if (!disasmOutput) {
+        disasmContent.innerHTML = '<div class="empty-message">No disassembly data available</div>';
+        return;
+    }
     const lines = disasmOutput.split("\n");
 
     lines.forEach((line) => {
@@ -2303,6 +2496,7 @@ function formatRISCVAssembly(code) {
 
 // Parse emulator output for trace information
 function parseEmulatorOutputForTrace(chunk) {
+    if (!chunk) return;
     const lines = chunk.split("\n");
 
     for (const line of lines) {
@@ -2780,12 +2974,14 @@ function updateRegistersFromCurrentValues() {
         const roleClass = getRegisterRoleClass(i);
         const alias = getRegisterAlias(i);
 
-        html += `<div class="register-item ${changed ? "changed" : ""} ${roleClass}" data-register="${regName}">
+        html += `<div class="register-item ${
+            changed ? "changed" : ""
+        } ${roleClass}" data-register="${regName}">
             <span class="reg-name">${regName}</span>
             <span class="reg-value ${changed ? "changed" : ""}">0x${parseInt(currentValue, 16)
-                .toString(16)
-                .padStart(8, "0")
-                .toUpperCase()}</span>
+            .toString(16)
+            .padStart(8, "0")
+            .toUpperCase()}</span>
             <span class="reg-alias">${alias}</span>
         </div>`;
 
@@ -2844,38 +3040,38 @@ function getRegisterAlias(regNum) {
 // Get RISC-V register role classes for coloring
 function getRegisterRoleClass(regNum) {
     const roleClasses = {
-        0: "reg-role-zero",          // x0 - constant value 0
-        1: "reg-role-ra",            // x1/ra - return address
-        2: "reg-role-sp",            // x2/sp - stack pointer
-        3: "reg-role-gp",            // x3/gp - global pointer
-        4: "reg-role-tp",            // x4/tp - thread pointer
-        5: "reg-role-temp",          // x5/t0 - temporary
-        6: "reg-role-temp",          // x6/t1 - temporary
-        7: "reg-role-temp",          // x7/t2 - temporary
-        8: "reg-role-fp",            // x8/s0/fp - saved/frame pointer
-        9: "reg-role-saved",         // x9/s1 - saved register
-        10: "reg-role-argret",       // x10/a0 - function argument/return value
-        11: "reg-role-argret",       // x11/a1 - function argument/return value
-        12: "reg-role-arg",          // x12/a2 - function argument
-        13: "reg-role-arg",          // x13/a3 - function argument
-        14: "reg-role-arg",          // x14/a4 - function argument
-        15: "reg-role-arg",          // x15/a5 - function argument
-        16: "reg-role-arg",          // x16/a6 - function argument
-        17: "reg-role-arg",          // x17/a7 - function argument
-        18: "reg-role-saved",        // x18/s2 - saved register
-        19: "reg-role-saved",        // x19/s3 - saved register
-        20: "reg-role-saved",        // x20/s4 - saved register
-        21: "reg-role-saved",        // x21/s5 - saved register
-        22: "reg-role-saved",        // x22/s6 - saved register
-        23: "reg-role-saved",        // x23/s7 - saved register
-        24: "reg-role-saved",        // x24/s8 - saved register
-        25: "reg-role-saved",        // x25/s9 - saved register
-        26: "reg-role-saved",        // x26/s10 - saved register
-        27: "reg-role-saved",        // x27/s11 - saved register
-        28: "reg-role-temp",         // x28/t3 - temporary
-        29: "reg-role-temp",         // x29/t4 - temporary
-        30: "reg-role-temp",         // x30/t5 - temporary
-        31: "reg-role-temp",         // x31/t6 - temporary
+        0: "reg-role-zero", // x0 - constant value 0
+        1: "reg-role-ra", // x1/ra - return address
+        2: "reg-role-sp", // x2/sp - stack pointer
+        3: "reg-role-gp", // x3/gp - global pointer
+        4: "reg-role-tp", // x4/tp - thread pointer
+        5: "reg-role-temp", // x5/t0 - temporary
+        6: "reg-role-temp", // x6/t1 - temporary
+        7: "reg-role-temp", // x7/t2 - temporary
+        8: "reg-role-fp", // x8/s0/fp - saved/frame pointer
+        9: "reg-role-saved", // x9/s1 - saved register
+        10: "reg-role-argret", // x10/a0 - function argument/return value
+        11: "reg-role-argret", // x11/a1 - function argument/return value
+        12: "reg-role-arg", // x12/a2 - function argument
+        13: "reg-role-arg", // x13/a3 - function argument
+        14: "reg-role-arg", // x14/a4 - function argument
+        15: "reg-role-arg", // x15/a5 - function argument
+        16: "reg-role-arg", // x16/a6 - function argument
+        17: "reg-role-arg", // x17/a7 - function argument
+        18: "reg-role-saved", // x18/s2 - saved register
+        19: "reg-role-saved", // x19/s3 - saved register
+        20: "reg-role-saved", // x20/s4 - saved register
+        21: "reg-role-saved", // x21/s5 - saved register
+        22: "reg-role-saved", // x22/s6 - saved register
+        23: "reg-role-saved", // x23/s7 - saved register
+        24: "reg-role-saved", // x24/s8 - saved register
+        25: "reg-role-saved", // x25/s9 - saved register
+        26: "reg-role-saved", // x26/s10 - saved register
+        27: "reg-role-saved", // x27/s11 - saved register
+        28: "reg-role-temp", // x28/t3 - temporary
+        29: "reg-role-temp", // x29/t4 - temporary
+        30: "reg-role-temp", // x30/t5 - temporary
+        31: "reg-role-temp", // x31/t6 - temporary
     };
     return roleClasses[regNum] || "reg-role-general";
 }
@@ -2892,10 +3088,7 @@ function addToTrace(instruction, pc, registers) {
 
     instructionTrace.push(traceEntry);
 
-    // Keep only last 1000 entries
-    if (instructionTrace.length > 1000) {
-        instructionTrace.shift();
-    }
+    // Keep all entries - no limit (make scrollable instead)
 
     updateTraceDisplay();
     updatePerformanceCounters();
@@ -2919,10 +3112,11 @@ function updateTraceDisplay() {
         html +=
             '<div class="trace-empty">No instructions executed yet. Start the emulator and use step/run commands to see the trace.</div>';
     } else {
-        // Show last 20 instructions
-        const recentTrace = instructionTrace.slice(-20);
-        recentTrace.forEach((entry, index) => {
-            html += `<div class="trace-entry ${index === recentTrace.length - 1 ? "current" : ""}">
+        // Show all instructions (make scrollable instead of cutting old entries)
+        instructionTrace.forEach((entry, index) => {
+            html += `<div class="trace-entry ${
+                index === instructionTrace.length - 1 ? "current" : ""
+            }">
                 <span class="trace-cycle">${entry.cycle}</span>
                 <span class="trace-pc">0x${entry.pc.toString(16).padStart(8, "0")}</span>
                 <span class="trace-instruction">${entry.instruction}</span>
@@ -3128,8 +3322,7 @@ function initCPUlatorFeatures() {
         panelContent.appendChild(tracePanel);
     }
 
-    // Enhance existing symbols panel with CPUlator-style functionality
-    enhanceSymbolsPanel();
+    // Note: Symbols panel functionality is now handled by the main event handlers
 
     // Add instruction lookup functionality
     document.addEventListener("click", (e) => {
@@ -3179,20 +3372,60 @@ function initCPUlatorFeatures() {
     console.log("✅ Features initialized");
 }
 
-function enhanceSymbolsPanel() {
-    const refreshButton = document.getElementById("refreshSymbols");
-    if (refreshButton) {
-        refreshButton.addEventListener("click", async () => {
-            try {
-                // Get symbol information from emulator
-                const result = await enqueueEmulatorCommand("info symbols");
-                if (result.ok) {
-                    updateSymbolsDisplay(result.output);
-                }
-            } catch (error) {
-                console.error("Failed to refresh symbols:", error);
+// Helper functions for refreshing panels with fallbacks
+async function refreshSymbolsPanel() {
+    try {
+        // Try GDB-style command first
+        let result = await enqueueEmulatorCommand("info symbols");
+        if (result.ok && result.output && result.output.trim()) {
+            updateSymbolsDisplay(result.output);
+            return;
+        }
+
+        // Fallback: try alternative commands
+        const fallbackCommands = ["symbols", "nm", "objdump -t"];
+        for (const cmd of fallbackCommands) {
+            result = await enqueueEmulatorCommand(cmd);
+            if (result.ok && result.output && result.output.trim()) {
+                updateSymbolsDisplay(result.output);
+                return;
             }
-        });
+        }
+
+        // If no command works, show empty state
+        updateSymbolsDisplay("");
+    } catch (error) {
+        updateSymbolsDisplay("");
+    }
+}
+
+async function refreshCallStackPanel() {
+    try {
+        // Try GDB-style command first
+        let result = await enqueueEmulatorCommand("info stack");
+        if (result.ok && result.output && result.output.trim()) {
+            updateCallStackDisplay(result.output);
+            return;
+        }
+
+        // Fallback: try alternative commands
+        const fallbackCommands = ["backtrace", "bt", "where", "stack"];
+        for (const cmd of fallbackCommands) {
+            result = await enqueueEmulatorCommand(cmd);
+            if (result.ok && result.output && result.output.trim()) {
+                updateCallStackDisplay(result.output);
+                return;
+            }
+        }
+
+        // If no command works, create a basic call stack from current state
+        const fakeStackOutput = `Current frame: main @ ${
+            currentRegisterValues["pc"] || "0x00000000"
+        }`;
+        updateCallStackDisplay(fakeStackOutput);
+    } catch (error) {
+        const fakeStackOutput = `Current frame: main @ 0x00000000`;
+        updateCallStackDisplay(fakeStackOutput);
     }
 }
 
@@ -3201,6 +3434,10 @@ function updateSymbolsDisplay(symbolData) {
     if (!symbolsContent) return;
 
     let html = "";
+    if (!symbolData) {
+        symbolsContent.innerHTML = '<div class="empty-message">No symbols available</div>';
+        return;
+    }
     const lines = symbolData.split("\n");
 
     lines.forEach((line) => {
@@ -3348,6 +3585,11 @@ function updateCallStackDisplay(stackOutput) {
 
     // Parse stack information (basic implementation)
     let html = "";
+    if (!stackOutput) {
+        callstackContent.innerHTML = '<div class="empty-message">No call stack available</div>';
+        if (callDepth) callDepth.textContent = "0";
+        return;
+    }
     const lines = stackOutput.split("\n");
     let stackEntries = [];
 

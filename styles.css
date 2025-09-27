@@ -532,6 +532,46 @@ body {
     font-style: italic;
 }
 
+/* RISC-V Assembly Syntax Highlighting */
+/* .asm-comment {
+    color: #989898;
+    font-style: italic;
+}
+
+.asm-label {
+    color: #d4336a;
+    font-weight: bold;
+}
+
+.asm-directive {
+    color: #249d83;
+    font-weight: 600;
+}
+
+.asm-instruction {
+    color: #0c9fbc;
+    font-weight: 600;
+}
+
+.asm-register {
+    color: #b033ea;
+    font-weight: 500;
+}
+
+.asm-immediate {
+    color: #ff63c3;
+    font-weight: 500;
+}
+
+.asm-string {
+    color: #8272ff;
+    font-style: italic;
+}
+
+.asm-punctuation {
+    color: var(--text-secondary);
+} */
+
 /* Disassembly Panel Styles */
 .disassembly-container {
     height: 100%;
@@ -856,11 +896,10 @@ body {
 /* Monaco editor tweaks */
 .monaco-editor .margin {
     border: none !important;
-    margin-right: 10px;
 }
 
 .monaco-editor .glyph-margin {
-    margin-right: 8px;
+    margin-right: 10px;
     border: none !important;
 }
 
@@ -887,10 +926,6 @@ body {
 
 .monaco-editor .lines-content {
     border: none !important;
-}
-
-.view-lines.monaco-mouse-cursor-text {
-    margin-left: 10px;
 }
 
 .sidebar-actions {
@@ -1051,12 +1086,12 @@ body {
     overflow: hidden;
     position: absolute;
     width: var(--vscode-editorStickyScroll-scrollableWidth);
-    margin-left: 10px;
+    /* margin-left: 10px; */
 }
 
 .monaco-scrollable-element > .invisible.fade {
     transition: opacity 0.8s linear;
-    transform: translate(-10px, 0);
+    /* transform: translate(-10px, 0); */
     cursor: pointer;
 }
 
@@ -2394,36 +2429,43 @@ button.loading::after {
     font-style: italic;
 }
 
+.asm-instruction {
+    color: #ff7cb0 !important;
+    font-weight: bold;
+}
+
 .asm-opcode {
-    color: #ff79c6 !important;
+    color: #fc905e !important;
     font-weight: bold;
 }
 
 .asm-register {
-    color: #50fa7b !important;
+    color: #15b058 !important;
     font-weight: bold;
 }
 
 .asm-number {
-    color: #bd93f9 !important;
+    color: #b283f4 !important;
+    font-weight: 500 !important;
 }
 
 .asm-string {
-    color: #f1fa8c !important;
+    color: #8998f8 !important;
 }
 
 .asm-label {
-    color: #ff5555 !important;
+    color: #8878ff !important;
     font-weight: bold;
 }
 
 .asm-directive {
-    color: #8be9fd !important;
+    color: #0fb3d7 !important;
     font-weight: bold;
 }
 
 .asm-immediate {
-    color: #bd93f9 !important;
+    color: #a777ea !important;
+    font-weight: bold !important;
 }
 
 /* CPUlator-style enhancements */
