@@ -759,11 +759,11 @@ async function initEditor() {
             { token: "number.binary", foreground: "A777EA" },
             { token: "number.float", foreground: "BD93F9" },
             { token: "operator", foreground: "9EA09C" },
-            { token: "delimiter", foreground: "F0EFE2" },
-            { token: "delimiter.bracket", foreground: "F0EFE2" },
-            { token: "delimiter.parenthesis", foreground: "F0EFE2" },
-            { token: "delimiter.square", foreground: "F0EFE2" },
-            { token: "delimiter.angle", foreground: "F0EFE2" },
+            { token: "delimiter", foreground: "B0B0B0" },
+            { token: "delimiter.bracket", foreground: "B0B0B0" },
+            { token: "delimiter.parenthesis", foreground: "B0B0B0" },
+            { token: "delimiter.square", foreground: "B0B0B0" },
+            { token: "delimiter.angle", foreground: "B0B0B0" },
             { token: "invalid", foreground: "F0827F" },
         ],
         colors: {
@@ -1689,16 +1689,13 @@ function setupButtonHandlers() {
     // Disassembly refresh button
     document.getElementById("disasmRefresh").addEventListener("click", async () => {
         const addr = document.getElementById("disasmAddr").value.trim();
-        const count = document.getElementById("disasmCount").value.trim() || "20";
+        const count = parseInt(document.getElementById("disasmCount").value.trim() || "20");
         try {
-            const command = addr ? `disassemble ${addr}` : `disassemble`;
-            const result = await enqueueEmulatorCommand(command);
-            if (result.ok) {
-                updateDisassemblyDisplay(result.output);
-                showNotification("Disassembly updated", "success");
-            }
+            await refreshDisassemblyPanel(addr, count);
+            showNotification("Disassembly updated", "success");
         } catch (error) {
             terminal.writeln(`Error: ${error.message}`);
+            showNotification("Failed to update disassembly", "error");
         }
     });
 
@@ -1918,20 +1915,320 @@ async function handleViewSource() {
 async function handleViewDisassembly() {
     try {
         terminal.writeln(">> Refreshing disassembly view...");
-
-        // Try to get disassembly directly if emulator is running
-        const disasmResult = await enqueueEmulatorCommand("disassemble");
-        if (disasmResult.ok && disasmResult.output) {
-            updateDisassemblyDisplay(disasmResult.output);
-            terminal.writeln("✅ Disassembly view updated");
-        } else {
-            // Fallback to full panel sync
-            await syncAllPanels("view disassembly");
-            terminal.writeln("✅ All panels synced from disassembly view");
-        }
+        // Get current PC for disassembly
+        const pcValue = currentRegisterValues["pc"];
+        const startAddr = pcValue ? `0x${pcValue}` : "0x400000";
+        await refreshDisassemblyPanel(startAddr, 20);
+        terminal.writeln("✅ Disassembly view updated");
     } catch (error) {
         terminal.writeln(`❌ Error updating disassembly: ${error.message}`);
     }
+}
+
+async function refreshDisassemblyPanel(startAddr, count = 20) {
+    try {
+        // If no start address provided, use current PC or default
+        if (!startAddr) {
+            const pcValue = currentRegisterValues["pc"];
+            startAddr = pcValue ? `0x${pcValue}` : "0x400000";
+        }
+
+        // Normalize address to hex format
+        let address = startAddr;
+        if (!address.startsWith("0x")) {
+            address = `0x${address}`;
+        }
+
+        // Convert to integer for calculations
+        const baseAddr = parseInt(address, 16);
+        const bytesToRead = count * 4; // 4 bytes per RISC-V instruction
+
+        // Read memory from the emulator
+        const memResult = await enqueueEmulatorCommand(`m${address} ${bytesToRead}`);
+
+        if (memResult.ok && memResult.output) {
+            // Parse memory output and disassemble
+            const memoryData = parseMemoryOutput(memResult.output);
+            const disassembly = disassembleMemoryData(memoryData, baseAddr, count);
+            updateDisassemblyDisplay(disassembly);
+        } else {
+            // Create placeholder disassembly
+            createPlaceholderDisassembly(baseAddr, count);
+        }
+    } catch (error) {
+        console.error("Error refreshing disassembly panel:", error);
+        const disasmContent = document.getElementById("disasmContent");
+        if (disasmContent) {
+            disasmContent.innerHTML = `<div class="disasm-error">Error: ${error.message}</div>`;
+        }
+    }
+}
+
+function parseMemoryOutput(output) {
+    const memoryData = [];
+    const lines = output.split('\n');
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        // Parse hex memory output format
+        // Expected format: address: value value value ...
+        const match = trimmed.match(/^([0-9a-fA-F]+):\s*(.+)$/);
+        if (match) {
+            const [, addr, values] = match;
+            const address = parseInt(addr, 16);
+            const hexValues = values.split(/\s+/).filter(v => v && /^[0-9a-fA-F]+$/.test(v));
+
+            for (let i = 0; i < hexValues.length; i++) {
+                memoryData.push({
+                    address: address + (i * 4),
+                    instruction: parseInt(hexValues[i], 16)
+                });
+            }
+        }
+    }
+
+    return memoryData;
+}
+
+function disassembleMemoryData(memoryData, baseAddr, count) {
+    let html = "";
+
+    for (let i = 0; i < Math.min(count, memoryData.length); i++) {
+        const data = memoryData[i];
+        if (!data) continue;
+
+        const address = data.address;
+        const instruction = data.instruction;
+        const addressHex = `0x${address.toString(16).padStart(8, '0')}`;
+        const opcodeHex = `0x${instruction.toString(16).padStart(8, '0')}`;
+
+        // Simple RISC-V disassembly
+        const disasm = disassembleInstruction(instruction);
+        const isCurrentPC = currentRegisterValues["pc"] === address.toString(16);
+
+        html += `<div class="disasm-line ${isCurrentPC ? "current-pc" : ""}">
+            <span class="disasm-addr">${addressHex}</span>
+            <span class="disasm-opcode">${opcodeHex}</span>
+            <span class="disasm-instr">${disasm}</span>
+            <span class="disasm-comment"></span>
+        </div>`;
+    }
+
+    return html;
+}
+
+function disassembleInstruction(instruction) {
+    // Basic RISC-V instruction decoding
+    const opcode = instruction & 0x7F;
+
+    switch (opcode) {
+        case 0x33: // R-type (add, sub, and, or, etc.)
+            return disassembleRType(instruction);
+        case 0x13: // I-type (addi, andi, ori, etc.)
+            return disassembleIType(instruction);
+        case 0x03: // Load instructions
+            return disassembleLoadType(instruction);
+        case 0x23: // Store instructions
+            return disassembleStoreType(instruction);
+        case 0x63: // Branch instructions
+            return disassembleBranchType(instruction);
+        case 0x6F: // JAL
+            return disassembleJType(instruction);
+        case 0x67: // JALR
+            return disassembleJALR(instruction);
+        case 0x37: // LUI
+            return disassembleLUI(instruction);
+        case 0x17: // AUIPC
+            return disassembleAUIPC(instruction);
+        default:
+            return `unknown (0x${instruction.toString(16)})`;
+    }
+}
+
+function disassembleRType(instruction) {
+    const rd = (instruction >> 7) & 0x1F;
+    const funct3 = (instruction >> 12) & 0x7;
+    const rs1 = (instruction >> 15) & 0x1F;
+    const rs2 = (instruction >> 20) & 0x1F;
+    const funct7 = (instruction >> 25) & 0x7F;
+
+    const rdName = getRegisterName(rd);
+    const rs1Name = getRegisterName(rs1);
+    const rs2Name = getRegisterName(rs2);
+
+    if (funct7 === 0x00) {
+        switch (funct3) {
+            case 0x0: return `add ${rdName}, ${rs1Name}, ${rs2Name}`;
+            case 0x4: return `xor ${rdName}, ${rs1Name}, ${rs2Name}`;
+            case 0x6: return `or ${rdName}, ${rs1Name}, ${rs2Name}`;
+            case 0x7: return `and ${rdName}, ${rs1Name}, ${rs2Name}`;
+            case 0x1: return `sll ${rdName}, ${rs1Name}, ${rs2Name}`;
+            case 0x5: return `srl ${rdName}, ${rs1Name}, ${rs2Name}`;
+            case 0x2: return `slt ${rdName}, ${rs1Name}, ${rs2Name}`;
+            case 0x3: return `sltu ${rdName}, ${rs1Name}, ${rs2Name}`;
+        }
+    } else if (funct7 === 0x20) {
+        switch (funct3) {
+            case 0x0: return `sub ${rdName}, ${rs1Name}, ${rs2Name}`;
+            case 0x5: return `sra ${rdName}, ${rs1Name}, ${rs2Name}`;
+        }
+    }
+
+    return `r-type (0x${instruction.toString(16)})`;
+}
+
+function disassembleIType(instruction) {
+    const rd = (instruction >> 7) & 0x1F;
+    const funct3 = (instruction >> 12) & 0x7;
+    const rs1 = (instruction >> 15) & 0x1F;
+    const imm = (instruction >> 20) & 0xFFF;
+    const signExtImm = imm > 0x7FF ? imm - 0x1000 : imm;
+
+    const rdName = getRegisterName(rd);
+    const rs1Name = getRegisterName(rs1);
+
+    switch (funct3) {
+        case 0x0: return `addi ${rdName}, ${rs1Name}, ${signExtImm}`;
+        case 0x2: return `slti ${rdName}, ${rs1Name}, ${signExtImm}`;
+        case 0x3: return `sltiu ${rdName}, ${rs1Name}, ${signExtImm}`;
+        case 0x4: return `xori ${rdName}, ${rs1Name}, ${signExtImm}`;
+        case 0x6: return `ori ${rdName}, ${rs1Name}, ${signExtImm}`;
+        case 0x7: return `andi ${rdName}, ${rs1Name}, ${signExtImm}`;
+        case 0x1: return `slli ${rdName}, ${rs1Name}, ${imm & 0x1F}`;
+        case 0x5:
+            if ((imm >> 5) === 0x00) return `srli ${rdName}, ${rs1Name}, ${imm & 0x1F}`;
+            if ((imm >> 5) === 0x20) return `srai ${rdName}, ${rs1Name}, ${imm & 0x1F}`;
+            break;
+    }
+
+    return `i-type (0x${instruction.toString(16)})`;
+}
+
+function disassembleLoadType(instruction) {
+    const rd = (instruction >> 7) & 0x1F;
+    const funct3 = (instruction >> 12) & 0x7;
+    const rs1 = (instruction >> 15) & 0x1F;
+    const imm = (instruction >> 20) & 0xFFF;
+    const signExtImm = imm > 0x7FF ? imm - 0x1000 : imm;
+
+    const rdName = getRegisterName(rd);
+    const rs1Name = getRegisterName(rs1);
+
+    switch (funct3) {
+        case 0x0: return `lb ${rdName}, ${signExtImm}(${rs1Name})`;
+        case 0x1: return `lh ${rdName}, ${signExtImm}(${rs1Name})`;
+        case 0x2: return `lw ${rdName}, ${signExtImm}(${rs1Name})`;
+        case 0x4: return `lbu ${rdName}, ${signExtImm}(${rs1Name})`;
+        case 0x5: return `lhu ${rdName}, ${signExtImm}(${rs1Name})`;
+    }
+
+    return `load (0x${instruction.toString(16)})`;
+}
+
+function disassembleStoreType(instruction) {
+    const funct3 = (instruction >> 12) & 0x7;
+    const rs1 = (instruction >> 15) & 0x1F;
+    const rs2 = (instruction >> 20) & 0x1F;
+    const imm = ((instruction >> 25) << 5) | ((instruction >> 7) & 0x1F);
+    const signExtImm = imm > 0x7FF ? imm - 0x1000 : imm;
+
+    const rs1Name = getRegisterName(rs1);
+    const rs2Name = getRegisterName(rs2);
+
+    switch (funct3) {
+        case 0x0: return `sb ${rs2Name}, ${signExtImm}(${rs1Name})`;
+        case 0x1: return `sh ${rs2Name}, ${signExtImm}(${rs1Name})`;
+        case 0x2: return `sw ${rs2Name}, ${signExtImm}(${rs1Name})`;
+    }
+
+    return `store (0x${instruction.toString(16)})`;
+}
+
+function disassembleBranchType(instruction) {
+    const funct3 = (instruction >> 12) & 0x7;
+    const rs1 = (instruction >> 15) & 0x1F;
+    const rs2 = (instruction >> 20) & 0x1F;
+
+    const rs1Name = getRegisterName(rs1);
+    const rs2Name = getRegisterName(rs2);
+
+    switch (funct3) {
+        case 0x0: return `beq ${rs1Name}, ${rs2Name}, <offset>`;
+        case 0x1: return `bne ${rs1Name}, ${rs2Name}, <offset>`;
+        case 0x4: return `blt ${rs1Name}, ${rs2Name}, <offset>`;
+        case 0x5: return `bge ${rs1Name}, ${rs2Name}, <offset>`;
+        case 0x6: return `bltu ${rs1Name}, ${rs2Name}, <offset>`;
+        case 0x7: return `bgeu ${rs1Name}, ${rs2Name}, <offset>`;
+    }
+
+    return `branch (0x${instruction.toString(16)})`;
+}
+
+function disassembleJType(instruction) {
+    const rd = (instruction >> 7) & 0x1F;
+    const rdName = getRegisterName(rd);
+    return `jal ${rdName}, <offset>`;
+}
+
+function disassembleJALR(instruction) {
+    const rd = (instruction >> 7) & 0x1F;
+    const rs1 = (instruction >> 15) & 0x1F;
+    const imm = (instruction >> 20) & 0xFFF;
+    const signExtImm = imm > 0x7FF ? imm - 0x1000 : imm;
+
+    const rdName = getRegisterName(rd);
+    const rs1Name = getRegisterName(rs1);
+
+    return `jalr ${rdName}, ${rs1Name}, ${signExtImm}`;
+}
+
+function disassembleLUI(instruction) {
+    const rd = (instruction >> 7) & 0x1F;
+    const imm = instruction >> 12;
+    const rdName = getRegisterName(rd);
+
+    return `lui ${rdName}, 0x${imm.toString(16)}`;
+}
+
+function disassembleAUIPC(instruction) {
+    const rd = (instruction >> 7) & 0x1F;
+    const imm = instruction >> 12;
+    const rdName = getRegisterName(rd);
+
+    return `auipc ${rdName}, 0x${imm.toString(16)}`;
+}
+
+function getRegisterName(regNum) {
+    const regNames = [
+        "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
+        "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
+        "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7",
+        "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"
+    ];
+
+    return regNames[regNum] || `x${regNum}`;
+}
+
+function createPlaceholderDisassembly(baseAddr, count) {
+    const disasmContent = document.getElementById("disasmContent");
+    if (!disasmContent) return;
+
+    let html = "";
+    for (let i = 0; i < count; i++) {
+        const address = baseAddr + (i * 4);
+        const addressHex = `0x${address.toString(16).padStart(8, '0')}`;
+
+        html += `<div class="disasm-line">
+            <span class="disasm-addr">${addressHex}</span>
+            <span class="disasm-opcode">????????</span>
+            <span class="disasm-instr">nop</span>
+            <span class="disasm-comment"># placeholder</span>
+        </div>`;
+    }
+
+    disasmContent.innerHTML = html;
 }
 
 async function handleViewStatus() {
@@ -2476,6 +2773,17 @@ function updateDisassemblyDisplay(disasmOutput) {
     const disasmContent = document.getElementById("disasmContent");
     if (!disasmContent) return;
 
+    // If the output is already HTML, just set it directly
+    if (typeof disasmOutput === 'string' && disasmOutput.includes('<div class="disasm-line">')) {
+        disasmContent.innerHTML = disasmOutput;
+        // Scroll to current PC if visible
+        const currentPCElement = disasmContent.querySelector(".current-pc");
+        if (currentPCElement) {
+            currentPCElement.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        return;
+    }
+
     let html = "";
     if (!disasmOutput) {
         disasmContent.innerHTML = '<div class="empty-message">No disassembly data available</div>';
@@ -2533,37 +2841,78 @@ function updateDisassemblyDisplay(disasmOutput) {
     }
 }
 
+function splitInstructionComment(line) {
+    const commentMarkers = [
+        { token: "//", index: line.indexOf("//") },
+        { token: "#", index: line.indexOf("#") },
+        { token: ";", index: line.indexOf(";") },
+    ].filter(({ index }) => index !== -1);
+
+    if (commentMarkers.length === 0) {
+        return { code: line.trim(), comment: "" };
+    }
+
+    commentMarkers.sort((a, b) => a.index - b.index);
+    const { index } = commentMarkers[0];
+    const code = line.slice(0, index).trimEnd();
+    const comment = line.slice(index).trim();
+    return { code: code.trim(), comment };
+}
+
+function formatOperandList(operandsText) {
+    if (!operandsText) return "";
+
+    const hasComma = operandsText.includes(",");
+    const rawOperands = hasComma
+        ? operandsText.split(",").map((operand) => operand.trim())
+        : operandsText.split(/\s+/).map((operand) => operand.trim());
+
+    const operands = rawOperands.filter(Boolean);
+    if (operands.length === 0) return "";
+
+    return operands
+        .map((operand, index) => (index < operands.length - 1 ? `${operand},` : operand))
+        .join(" ");
+}
+
 function formatRISCVAssembly(code) {
     return code
         .split("\n")
         .map((line) => {
-            const trimmed = line.trim();
-            if (!trimmed) return ""; // Empty lines
-            if (trimmed.startsWith("#") || trimmed.startsWith("//")) {
-                return trimmed; // Comments
+            const { code: instructionPart, comment } = splitInstructionComment(line);
+            const trimmed = instructionPart.trim();
+
+            if (!trimmed) {
+                return comment || "";
             }
+
             if (trimmed.startsWith(".")) {
-                return trimmed; // Directives
+                return comment ? `${trimmed}  ${comment}` : trimmed;
             }
+
             if (trimmed.endsWith(":")) {
-                return trimmed; // Labels
+                return comment ? `${trimmed}  ${comment}` : trimmed;
             }
 
-            // Instructions - add proper indentation
             const parts = trimmed.split(/\s+/);
-            if (parts.length > 0) {
-                const instruction = parts[0];
-                const operands = parts.slice(1).join(" ");
-
-                if (operands) {
-                    // Align operands with proper spacing
-                    return `    ${instruction.padEnd(8)} ${operands}`;
-                } else {
-                    return `    ${instruction}`;
-                }
+            if (parts.length === 0) {
+                return line.trim();
             }
 
-            return line;
+            const mnemonic = parts[0];
+            const operandText = trimmed.slice(mnemonic.length).trim();
+            const formattedOperands = formatOperandList(operandText);
+
+            let formattedLine = `    ${mnemonic.padEnd(8)}`;
+            if (formattedOperands) {
+                formattedLine += ` ${formattedOperands}`;
+            }
+
+            if (comment) {
+                formattedLine += `  ${comment}`;
+            }
+
+            return formattedLine;
         })
         .join("\n");
 }
@@ -2997,6 +3346,368 @@ const riscvInstructions = {
         implementation: "// No operation",
         encoding: "000000000000 00000 000 00000 0010011",
         example: "nop  # do nothing",
+    },
+
+    // Additional Load/Store Instructions
+    lbu: {
+        name: "Load Byte Unsigned",
+        format: "lbu rd, offset(rs1)",
+        category: "RV32I",
+        description: "Load 8-bit value from memory and zero-extend to 32-bits before storing in rd.",
+        implementation: "x[rd] = zext(M[x[rs1] + sext(offset)][7:0])",
+        encoding: "imm[11:0] rs1 100 rd 0000011",
+        example: "lbu x1, 0(x2)  # x1 = zero_extend(memory[x2])",
+    },
+    lhu: {
+        name: "Load Halfword Unsigned",
+        format: "lhu rd, offset(rs1)",
+        category: "RV32I",
+        description: "Load 16-bit value from memory and zero-extend to 32-bits before storing in rd.",
+        implementation: "x[rd] = zext(M[x[rs1] + sext(offset)][15:0])",
+        encoding: "imm[11:0] rs1 101 rd 0000011",
+        example: "lhu x1, 0(x2)  # x1 = zero_extend(memory[x2:x2+1])",
+    },
+
+    // Shift Instructions
+    sll: {
+        name: "Shift Left Logical",
+        format: "sll rd, rs1, rs2",
+        category: "RV32I",
+        description: "Shift rs1 left by the number of bits specified in the lower 5 bits of rs2.",
+        implementation: "x[rd] = x[rs1] << x[rs2][4:0]",
+        encoding: "0000000 rs2 rs1 001 rd 0110011",
+        example: "sll x1, x2, x3  # x1 = x2 << (x3 & 0x1f)",
+    },
+    srl: {
+        name: "Shift Right Logical",
+        format: "srl rd, rs1, rs2",
+        category: "RV32I",
+        description: "Shift rs1 right by the number of bits specified in the lower 5 bits of rs2.",
+        implementation: "x[rd] = x[rs1] >> x[rs2][4:0]",
+        encoding: "0000000 rs2 rs1 101 rd 0110011",
+        example: "srl x1, x2, x3  # x1 = x2 >> (x3 & 0x1f)",
+    },
+    sra: {
+        name: "Shift Right Arithmetic",
+        format: "sra rd, rs1, rs2",
+        category: "RV32I",
+        description: "Shift rs1 right by the number of bits specified in the lower 5 bits of rs2, preserving sign.",
+        implementation: "x[rd] = x[rs1] >>> x[rs2][4:0]",
+        encoding: "0100000 rs2 rs1 101 rd 0110011",
+        example: "sra x1, x2, x3  # x1 = x2 >>> (x3 & 0x1f)",
+    },
+    srli: {
+        name: "Shift Right Logical Immediate",
+        format: "srli rd, rs1, shamt",
+        category: "RV32I",
+        description: "Shift rs1 right by immediate amount (0-31).",
+        implementation: "x[rd] = x[rs1] >> shamt",
+        encoding: "000000 shamt rs1 101 rd 0010011",
+        example: "srli x1, x2, 4  # x1 = x2 >> 4",
+    },
+    srai: {
+        name: "Shift Right Arithmetic Immediate",
+        format: "srai rd, rs1, shamt",
+        category: "RV32I",
+        description: "Shift rs1 right by immediate amount (0-31), preserving sign.",
+        implementation: "x[rd] = x[rs1] >>> shamt",
+        encoding: "010000 shamt rs1 101 rd 0010011",
+        example: "srai x1, x2, 4  # x1 = x2 >>> 4",
+    },
+
+    // Comparison Instructions
+    slt: {
+        name: "Set Less Than",
+        format: "slt rd, rs1, rs2",
+        category: "RV32I",
+        description: "Set rd to 1 if rs1 < rs2 (signed), otherwise 0.",
+        implementation: "x[rd] = (x[rs1] < x[rs2]) ? 1 : 0",
+        encoding: "0000000 rs2 rs1 010 rd 0110011",
+        example: "slt x1, x2, x3  # x1 = (x2 < x3) ? 1 : 0",
+    },
+    sltu: {
+        name: "Set Less Than Unsigned",
+        format: "sltu rd, rs1, rs2",
+        category: "RV32I",
+        description: "Set rd to 1 if rs1 < rs2 (unsigned), otherwise 0.",
+        implementation: "x[rd] = (x[rs1] <u x[rs2]) ? 1 : 0",
+        encoding: "0000000 rs2 rs1 011 rd 0110011",
+        example: "sltu x1, x2, x3  # x1 = (x2 <u x3) ? 1 : 0",
+    },
+    slti: {
+        name: "Set Less Than Immediate",
+        format: "slti rd, rs1, imm",
+        category: "RV32I",
+        description: "Set rd to 1 if rs1 < sign-extended immediate (signed), otherwise 0.",
+        implementation: "x[rd] = (x[rs1] < sext(immediate)) ? 1 : 0",
+        encoding: "imm[11:0] rs1 010 rd 0010011",
+        example: "slti x1, x2, 100  # x1 = (x2 < 100) ? 1 : 0",
+    },
+    sltiu: {
+        name: "Set Less Than Immediate Unsigned",
+        format: "sltiu rd, rs1, imm",
+        category: "RV32I",
+        description: "Set rd to 1 if rs1 < sign-extended immediate (unsigned), otherwise 0.",
+        implementation: "x[rd] = (x[rs1] <u sext(immediate)) ? 1 : 0",
+        encoding: "imm[11:0] rs1 011 rd 0010011",
+        example: "sltiu x1, x2, 100  # x1 = (x2 <u 100) ? 1 : 0",
+    },
+
+    // Branch Instructions
+    bltu: {
+        name: "Branch Less Than Unsigned",
+        format: "bltu rs1, rs2, offset",
+        category: "RV32I",
+        description: "Branch to PC+offset if rs1 < rs2 (unsigned comparison).",
+        implementation: "if (x[rs1] <u x[rs2]) pc += sext(offset)",
+        encoding: "imm[12|10:5] rs2 rs1 110 imm[4:1|11] 1100011",
+        example: "bltu x1, x2, loop  # if x1 < x2 (unsigned) goto loop",
+    },
+    bgeu: {
+        name: "Branch Greater Equal Unsigned",
+        format: "bgeu rs1, rs2, offset",
+        category: "RV32I",
+        description: "Branch to PC+offset if rs1 >= rs2 (unsigned comparison).",
+        implementation: "if (x[rs1] >=u x[rs2]) pc += sext(offset)",
+        encoding: "imm[12|10:5] rs2 rs1 111 imm[4:1|11] 1100011",
+        example: "bgeu x1, x2, done  # if x1 >= x2 (unsigned) goto done",
+    },
+
+    // M Extension - Multiplication and Division
+    mul: {
+        name: "Multiply",
+        format: "mul rd, rs1, rs2",
+        category: "RV32M",
+        description: "Multiply rs1 and rs2, store lower 32 bits in rd.",
+        implementation: "x[rd] = (x[rs1] * x[rs2])[31:0]",
+        encoding: "0000001 rs2 rs1 000 rd 0110011",
+        example: "mul x1, x2, x3  # x1 = (x2 * x3) & 0xFFFFFFFF",
+    },
+    mulh: {
+        name: "Multiply High",
+        format: "mulh rd, rs1, rs2",
+        category: "RV32M",
+        description: "Multiply rs1 and rs2 (signed), store upper 32 bits in rd.",
+        implementation: "x[rd] = (x[rs1] * x[rs2])[63:32]",
+        encoding: "0000001 rs2 rs1 001 rd 0110011",
+        example: "mulh x1, x2, x3  # x1 = upper 32 bits of x2 * x3",
+    },
+    mulhu: {
+        name: "Multiply High Unsigned",
+        format: "mulhu rd, rs1, rs2",
+        category: "RV32M",
+        description: "Multiply rs1 and rs2 (unsigned), store upper 32 bits in rd.",
+        implementation: "x[rd] = (x[rs1] *u x[rs2])[63:32]",
+        encoding: "0000001 rs2 rs1 011 rd 0110011",
+        example: "mulhu x1, x2, x3  # x1 = upper 32 bits of x2 *u x3",
+    },
+    mulhsu: {
+        name: "Multiply High Signed-Unsigned",
+        format: "mulhsu rd, rs1, rs2",
+        category: "RV32M",
+        description: "Multiply rs1 (signed) and rs2 (unsigned), store upper 32 bits in rd.",
+        implementation: "x[rd] = (x[rs1] *su x[rs2])[63:32]",
+        encoding: "0000001 rs2 rs1 010 rd 0110011",
+        example: "mulhsu x1, x2, x3  # x1 = upper 32 bits of x2 *su x3",
+    },
+    div: {
+        name: "Divide",
+        format: "div rd, rs1, rs2",
+        category: "RV32M",
+        description: "Divide rs1 by rs2 (signed), store quotient in rd.",
+        implementation: "x[rd] = x[rs1] / x[rs2]",
+        encoding: "0000001 rs2 rs1 100 rd 0110011",
+        example: "div x1, x2, x3  # x1 = x2 / x3",
+    },
+    divu: {
+        name: "Divide Unsigned",
+        format: "divu rd, rs1, rs2",
+        category: "RV32M",
+        description: "Divide rs1 by rs2 (unsigned), store quotient in rd.",
+        implementation: "x[rd] = x[rs1] /u x[rs2]",
+        encoding: "0000001 rs2 rs1 101 rd 0110011",
+        example: "divu x1, x2, x3  # x1 = x2 /u x3",
+    },
+    rem: {
+        name: "Remainder",
+        format: "rem rd, rs1, rs2",
+        category: "RV32M",
+        description: "Remainder of rs1 divided by rs2 (signed), store in rd.",
+        implementation: "x[rd] = x[rs1] % x[rs2]",
+        encoding: "0000001 rs2 rs1 110 rd 0110011",
+        example: "rem x1, x2, x3  # x1 = x2 % x3",
+    },
+    remu: {
+        name: "Remainder Unsigned",
+        format: "remu rd, rs1, rs2",
+        category: "RV32M",
+        description: "Remainder of rs1 divided by rs2 (unsigned), store in rd.",
+        implementation: "x[rd] = x[rs1] %u x[rs2]",
+        encoding: "0000001 rs2 rs1 111 rd 0110011",
+        example: "remu x1, x2, x3  # x1 = x2 %u x3",
+    },
+
+    // A Extension - Atomic Instructions
+    "lr.w": {
+        name: "Load Reserved Word",
+        format: "lr.w rd, (rs1)",
+        category: "RV32A",
+        description: "Load word from memory and register a reservation on the memory address.",
+        implementation: "x[rd] = M[x[rs1]]; reserve(x[rs1])",
+        encoding: "00010 aq rl 00000 rs1 010 rd 0101111",
+        example: "lr.w x1, (x2)  # x1 = memory[x2], reserve x2",
+    },
+    "sc.w": {
+        name: "Store Conditional Word",
+        format: "sc.w rd, rs2, (rs1)",
+        category: "RV32A",
+        description: "Store word to memory if reservation is still valid.",
+        implementation: "if (valid_reservation(x[rs1])) { M[x[rs1]] = x[rs2]; x[rd] = 0 } else x[rd] = 1",
+        encoding: "00011 aq rl rs2 rs1 010 rd 0101111",
+        example: "sc.w x1, x3, (x2)  # store x3 to memory[x2], x1 = success",
+    },
+
+    // F Extension - Single-Precision Floating-Point
+    "fadd.s": {
+        name: "Floating-Point Add Single",
+        format: "fadd.s rd, rs1, rs2",
+        category: "RV32F",
+        description: "Add single-precision floating-point values.",
+        implementation: "f[rd] = f[rs1] + f[rs2]",
+        encoding: "0000000 rs2 rs1 rm rd 1010011",
+        example: "fadd.s f1, f2, f3  # f1 = f2 + f3",
+    },
+    "fsub.s": {
+        name: "Floating-Point Subtract Single",
+        format: "fsub.s rd, rs1, rs2",
+        category: "RV32F",
+        description: "Subtract single-precision floating-point values.",
+        implementation: "f[rd] = f[rs1] - f[rs2]",
+        encoding: "0000100 rs2 rs1 rm rd 1010011",
+        example: "fsub.s f1, f2, f3  # f1 = f2 - f3",
+    },
+    "fmul.s": {
+        name: "Floating-Point Multiply Single",
+        format: "fmul.s rd, rs1, rs2",
+        category: "RV32F",
+        description: "Multiply single-precision floating-point values.",
+        implementation: "f[rd] = f[rs1] * f[rs2]",
+        encoding: "0001000 rs2 rs1 rm rd 1010011",
+        example: "fmul.s f1, f2, f3  # f1 = f2 * f3",
+    },
+    "fdiv.s": {
+        name: "Floating-Point Divide Single",
+        format: "fdiv.s rd, rs1, rs2",
+        category: "RV32F",
+        description: "Divide single-precision floating-point values.",
+        implementation: "f[rd] = f[rs1] / f[rs2]",
+        encoding: "0001100 rs2 rs1 rm rd 1010011",
+        example: "fdiv.s f1, f2, f3  # f1 = f2 / f3",
+    },
+
+    // System Instructions
+    ecall: {
+        name: "Environment Call",
+        format: "ecall",
+        category: "RV32I",
+        description: "Make a service request to the execution environment.",
+        implementation: "RaiseException(EnvironmentCall)",
+        encoding: "000000000000 00000 000 00000 1110011",
+        example: "ecall  # system call",
+    },
+    ebreak: {
+        name: "Environment Break",
+        format: "ebreak",
+        category: "RV32I",
+        description: "Request transfer of control to a debugger.",
+        implementation: "RaiseException(Breakpoint)",
+        encoding: "000000000001 00000 000 00000 1110011",
+        example: "ebreak  # debugger breakpoint",
+    },
+    fence: {
+        name: "Fence",
+        format: "fence pred, succ",
+        category: "RV32I",
+        description: "Synchronize memory and I/O operations.",
+        implementation: "// Memory ordering constraint",
+        encoding: "pred succ 00000 000 00000 0001111",
+        example: "fence rw, rw  # memory barrier",
+    },
+
+    // B Extension - Bit Manipulation (ratified)
+    andn: {
+        name: "AND with Inverted Operand",
+        format: "andn rd, rs1, rs2",
+        category: "RV32B",
+        description: "Bitwise AND rs1 with bitwise inverted rs2.",
+        implementation: "x[rd] = x[rs1] & ~x[rs2]",
+        encoding: "0100000 rs2 rs1 111 rd 0110011",
+        example: "andn x1, x2, x3  # x1 = x2 & ~x3",
+    },
+    orn: {
+        name: "OR with Inverted Operand",
+        format: "orn rd, rs1, rs2",
+        category: "RV32B",
+        description: "Bitwise OR rs1 with bitwise inverted rs2.",
+        implementation: "x[rd] = x[rs1] | ~x[rs2]",
+        encoding: "0100000 rs2 rs1 110 rd 0110011",
+        example: "orn x1, x2, x3  # x1 = x2 | ~x3",
+    },
+    xnor: {
+        name: "Exclusive NOR",
+        format: "xnor rd, rs1, rs2",
+        category: "RV32B",
+        description: "Bitwise exclusive NOR of rs1 and rs2.",
+        implementation: "x[rd] = x[rs1] ^ ~x[rs2]",
+        encoding: "0100000 rs2 rs1 100 rd 0110011",
+        example: "xnor x1, x2, x3  # x1 = x2 ^ ~x3",
+    },
+    clz: {
+        name: "Count Leading Zeros",
+        format: "clz rd, rs",
+        category: "RV32B",
+        description: "Count the number of leading zero bits in rs.",
+        implementation: "x[rd] = clz(x[rs])",
+        encoding: "0110000 00000 rs 001 rd 0010011",
+        example: "clz x1, x2  # x1 = count leading zeros in x2",
+    },
+    ctz: {
+        name: "Count Trailing Zeros",
+        format: "ctz rd, rs",
+        category: "RV32B",
+        description: "Count the number of trailing zero bits in rs.",
+        implementation: "x[rd] = ctz(x[rs])",
+        encoding: "0110000 00001 rs 001 rd 0010011",
+        example: "ctz x1, x2  # x1 = count trailing zeros in x2",
+    },
+    cpop: {
+        name: "Count Population",
+        format: "cpop rd, rs",
+        category: "RV32B",
+        description: "Count the number of 1 bits in rs.",
+        implementation: "x[rd] = popcount(x[rs])",
+        encoding: "0110000 00010 rs 001 rd 0010011",
+        example: "cpop x1, x2  # x1 = number of 1 bits in x2",
+    },
+
+    // Zicond Extension - Conditional Operations
+    czero_eqz: {
+        name: "Conditional Zero if Equal to Zero",
+        format: "czero.eqz rd, rs1, rs2",
+        category: "Zicond",
+        description: "Set rd to zero if rs2 is zero, otherwise copy rs1 to rd.",
+        implementation: "x[rd] = (x[rs2] == 0) ? 0 : x[rs1]",
+        encoding: "0000111 rs2 rs1 101 rd 0110011",
+        example: "czero.eqz x1, x2, x3  # x1 = x3 ? x2 : 0",
+    },
+    czero_nez: {
+        name: "Conditional Zero if Not Equal to Zero",
+        format: "czero.nez rd, rs1, rs2",
+        category: "Zicond",
+        description: "Set rd to zero if rs2 is not zero, otherwise copy rs1 to rd.",
+        implementation: "x[rd] = (x[rs2] != 0) ? 0 : x[rs1]",
+        encoding: "0000111 rs2 rs1 111 rd 0110011",
+        example: "czero.nez x1, x2, x3  # x1 = x3 ? 0 : x2",
     },
 };
 

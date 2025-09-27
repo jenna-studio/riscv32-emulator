@@ -89,6 +89,66 @@ body {
     font-size: 12px;
 }
 
+.left-controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.file-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.file-controls select,
+.file-controls input {
+    padding: 4px 8px;
+    border: 1px solid var(--border-light);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.file-controls button {
+    padding: 4px 8px;
+    font-size: 12px;
+}
+
+.memory-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.memory-controls select,
+.memory-controls input {
+    padding: 4px 8px;
+    border: 1px solid var(--border-light);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.memory-controls button {
+    padding: 4px 8px;
+    font-size: 12px;
+}
+
+.compile-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.compile-controls button {
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
 /* Quickbar Styling */
 .quickbar {
     display: flex;
@@ -228,12 +288,8 @@ body {
     color: #663333;
 }
 
-/* File Controls */
 .file-controls {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-bottom: 12px;
+    display: inline-block;
 }
 
 .file-info {
@@ -299,8 +355,7 @@ body {
     gap: 6px;
 }
 
-/* Memory Controls */
-.memory-controls,
+/* B Controls */
 .breakpoint-controls {
     margin-bottom: 16px;
 }
@@ -1599,22 +1654,9 @@ body {
     }
 }
 
-/* Memory View */
-.memory-container {
-    height: 100%;
-    padding: 16px;
-    overflow-y: auto;
-}
-
 .memory-controls {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    margin-bottom: 16px;
-    padding: 12px;
+    display: inline-block;
     background: var(--bg-secondary);
-    border-radius: var(--radius);
-    border: 1px solid var(--border-light);
 }
 
 .memory-controls input {
@@ -1628,7 +1670,7 @@ body {
     padding: 6px 12px;
     font-size: 11px;
     background: var(--accent-skyblue);
-    border-color: #99d9ff;
+    /* border-color: #99d9ff; */
     color: #1e4a66;
 }
 
@@ -1987,7 +2029,8 @@ input::placeholder {
 }
 
 #memBtn,
-#bpSet {
+#bpSet,
+#gotoBtn {
     background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%);
     font-family: "Fira Code", Menlo, "SF Mono", "Roboto Mono", Consolas, monospace;
     font-size: 11px;
@@ -2597,6 +2640,20 @@ select:focus {
 }
 
 .disasm-comment {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.disasm-error {
+    text-align: center;
+    padding: 20px;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.disasm-empty {
+    text-align: center;
+    padding: 20px;
     color: var(--text-muted);
     font-style: italic;
 }
