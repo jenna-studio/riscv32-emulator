@@ -68,17 +68,38 @@ body {
     flex: 1;
 }
 
+.toolbar-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.toolbar-controls select,
+.toolbar-controls input {
+    padding: 4px 8px;
+    border: 1px solid var(--border-light);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.toolbar-controls button {
+    padding: 4px 8px;
+    font-size: 12px;
+}
+
 /* Quickbar Styling */
 .quickbar {
     display: flex;
-    gap: 24px;
-    padding: 8px 20px;
+    gap: 16px;
+    padding: 6px 20px;
     align-items: flex-start;
     background: var(--bg-tertiary);
     border-bottom: 1px solid var(--border-light);
     flex-wrap: wrap;
     flex-shrink: 0;
-    min-height: 50px;
+    min-height: 36px;
 }
 
 /* Control Groups */
@@ -343,6 +364,12 @@ body {
     grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     gap: 8px;
     padding: 12px;
+}
+
+/* Binary format layout with 2 columns for longer binary values */
+.register-table-binary {
+    grid-template-columns: repeat(2, 1fr) !important;
+    gap: 12px;
 }
 
 .register-item {

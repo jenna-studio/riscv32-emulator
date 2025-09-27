@@ -729,34 +729,34 @@ async function initEditor() {
         base: "vs",
         inherit: true,
         rules: [
-            { token: "comment", foreground: "B3B1B3" },
+            { token: "comment", foreground: "B0B0B0" },
             { token: "comment.todo", foreground: "F6C177" },
-            { token: "keyword", foreground: "F181C4" },
-            { token: "keyword.control", foreground: "F181C4" },
-            { token: "keyword.directive", foreground: "00B2C9" },
+            { token: "keyword", foreground: "FF7CB0" },
+            { token: "keyword.control", foreground: "FF7CB0" },
+            { token: "keyword.directive", foreground: "0FB3D7" },
             { token: "keyword.operator", foreground: "E5C147" },
             { token: "meta", foreground: "9795F1" },
-            { token: "variable", foreground: "1DE9B6" },
+            { token: "variable", foreground: "15B058" },
             { token: "variable.predefined", foreground: "2DBA77" },
             { token: "variable.parameter", foreground: "FE90AF" },
             { token: "variable.other", foreground: "D8D7CB" },
             { token: "variable.language", foreground: "F181C4" },
             { token: "identifier", foreground: "3DC7B9" },
             { token: "identifier.constant", foreground: "BD93F9" },
-            { token: "identifier.label", foreground: "FF8F6D" },
+            { token: "identifier.label", foreground: "8878FF" },
             { token: "type", foreground: "00B6CD" },
             { token: "type.identifier", foreground: "00B6CD" },
             { token: "storage.type", foreground: "00B6CD" },
             { token: "support.function", foreground: "3DC7B9" },
             { token: "support.type", foreground: "00B6CD" },
             { token: "support.variable", foreground: "75DFBB" },
-            { token: "string", foreground: "8288FA" },
+            { token: "string", foreground: "8998F8" },
             { token: "string.escape", foreground: "FFAAE1" },
             { token: "string.invalid", foreground: "EB5BCB" },
-            { token: "number", foreground: "BD93F9" },
-            { token: "number.hex", foreground: "BD93F9" },
-            { token: "number.octal", foreground: "BD93F9" },
-            { token: "number.binary", foreground: "BD93F9" },
+            { token: "number", foreground: "B283F4" },
+            { token: "number.hex", foreground: "A777EA" },
+            { token: "number.octal", foreground: "A777EA" },
+            { token: "number.binary", foreground: "A777EA" },
             { token: "number.float", foreground: "BD93F9" },
             { token: "operator", foreground: "9EA09C" },
             { token: "delimiter", foreground: "F0EFE2" },
@@ -1003,20 +1003,20 @@ async function loadExampleFiles() {
 
     examplesList.innerHTML = "";
 
+    // Always load hardcoded examples
+    Object.keys(fileMapping).forEach((fileName) => {
+        const item = document.createElement("div");
+        item.className = "file-item";
+        item.innerHTML = `<i class="fas fa-file-code"></i> ${fileName}`;
+        item.style.cursor = "pointer";
+        item.addEventListener("click", () => loadFilePair(fileName));
+        examplesList.appendChild(item);
+    });
+    console.log("✅ Example files loaded");
+
+    // Load workspace files if workspace is set
     if (currentWorkspaceFolder) {
-        // Load files from workspace folder
         await loadWorkspaceFiles();
-    } else {
-        // Load hardcoded examples
-        Object.keys(fileMapping).forEach((fileName) => {
-            const item = document.createElement("div");
-            item.className = "file-item";
-            item.innerHTML = `<i class="fas fa-file-code"></i> ${fileName}`;
-            item.style.cursor = "pointer";
-            item.addEventListener("click", () => loadFilePair(fileName));
-            examplesList.appendChild(item);
-        });
-        console.log("✅ Example files loaded");
     }
 }
 
@@ -1102,6 +1102,42 @@ function clearWorkspaceFiles() {
     }
 }
 
+function formatNumberByDisplayOption(value) {
+    if (!value) return value;
+
+    const formatSelect = document.getElementById("numberFormat");
+    const format = formatSelect ? formatSelect.value : "hex";
+
+    // Convert hex string to number if needed
+    let num;
+    if (typeof value === "string" && value.startsWith("0x")) {
+        num = parseInt(value, 16);
+    } else if (typeof value === "string") {
+        num = parseInt(value, 16); // Assume hex if string
+    } else {
+        num = value;
+    }
+
+    if (isNaN(num)) return value;
+
+    // Convert to unsigned 32-bit for proper display
+    num = num >>> 0;
+
+    switch (format) {
+        case "dec":
+            return num.toString(10);
+        case "bin":
+            // Show only lower 16 bits for better display in registers panel
+            const lower16 = num & 0xffff;
+            return "0b" + lower16.toString(2).padStart(16, "0");
+        case "oct":
+            return "0o" + num.toString(8);
+        case "hex":
+        default:
+            return "0x" + num.toString(16).padStart(8, "0");
+    }
+}
+
 async function sendCommand(command) {
     try {
         const result = await enqueueEmulatorCommand(command);
@@ -1121,11 +1157,8 @@ async function sendCommand(command) {
                 await updateAfterExecution(command);
 
                 // For step commands, also switch to registers panel to show changes
-                if (command === "s" || command.startsWith("stepi")) {
-                    setTimeout(() => {
-                        switchToPanel("registers");
-                    }, 200);
-                }
+                // Keep data synchronized but don't auto-switch panels
+                // User requested no automatic panel switching
             }
 
             // Handle register display commands
@@ -1515,11 +1548,7 @@ function setupButtonHandlers() {
             terminal.writeln(result.output);
 
             // Update CPUlator-style memory display
-            updateMemoryDisplay(
-                result.output,
-                parseInt(addr.replace("0x", ""), 16),
-                parseInt(length)
-            );
+            updateMemoryDisplay(result.output);
         } else {
             terminal.writeln(`Error: ${result.error}`);
         }
@@ -1723,6 +1752,51 @@ function setupButtonHandlers() {
                 sendCommand(cmd);
             }
         });
+    });
+
+    // Display format dropdown handler
+    document.getElementById("numberFormat").addEventListener("change", (e) => {
+        const format = e.target.value;
+        showNotification(`Display format changed to ${format}`, "info");
+        // Refresh register display with new format
+        updateRegistersFromCurrentValues();
+        // Note: memory and disassembly displays handle their own formatting
+    });
+
+    // Add keyboard navigation
+    document.addEventListener("keydown", (e) => {
+        // Only handle when not focused on input elements
+        if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+
+        // Ctrl+1-5 for panel switching
+        if (e.ctrlKey && e.key >= "1" && e.key <= "5") {
+            e.preventDefault();
+            const panels = ["registers", "source", "disassembly", "memory", "statistics"];
+            const panelIndex = parseInt(e.key) - 1;
+            if (panels[panelIndex]) {
+                switchToPanel(panels[panelIndex]);
+            }
+        }
+
+        // F5 for run, F10 for step
+        if (e.key === "F5" && !e.shiftKey) {
+            e.preventDefault();
+            document.querySelector('[data-cmd="r"]')?.click();
+        } else if (e.key === "F10") {
+            e.preventDefault();
+            document.querySelector('[data-cmd="s1"]')?.click();
+        } else if (e.key === "F5" && e.shiftKey) {
+            e.preventDefault();
+            document.querySelector('[data-cmd="q"]')?.click();
+        }
+
+        // Escape to focus terminal command input
+        if (e.key === "Escape") {
+            const cmdInput = document.getElementById("cmd");
+            if (cmdInput) {
+                cmdInput.focus();
+            }
+        }
     });
 
     console.log("✅ Button handlers set up");
@@ -2549,12 +2623,25 @@ function parseEmulatorOutputForTrace(chunk) {
 
 window.api.onOutput((chunk) => {
     if (terminal) {
-        terminal.write(chunk);
+        // Format the output before displaying
+        const formattedChunk = formatTerminalOutput(chunk);
+        terminal.write(formattedChunk);
     }
 
     // Parse emulator output for trace information
     parseEmulatorOutputForTrace(chunk);
 });
+
+// Format terminal output for better readability
+function formatTerminalOutput(chunk) {
+    if (!chunk) return chunk;
+
+    // Replace the verbose format [inst: X pc: Y, src line Z] with cleaner [inst:X, pc:Y, src:Z]
+    return chunk.replace(
+        /\[inst:\s*(\d+)\s+pc:\s*(\d+),\s*src line\s*(\d+)\]/g,
+        "[inst:$1, pc:$2, src:$3]"
+    );
+}
 
 // RISC-V Instruction Reference Database
 const riscvInstructions = {
@@ -2963,7 +3050,13 @@ function updateRegistersFromCurrentValues() {
     const registersGrid = document.getElementById("registersGrid");
     if (!registersGrid) return;
 
-    let html = '<div class="register-table">';
+    // Check if binary format is selected to use 2-column layout
+    const formatSelect = document.getElementById("numberFormat");
+    const format = formatSelect ? formatSelect.value : "hex";
+    const isBinaryFormat = format === "bin";
+    const tableClass = isBinaryFormat ? "register-table register-table-binary" : "register-table";
+
+    let html = `<div class="${tableClass}">`;
 
     // Display all 32 RISC-V registers
     for (let i = 0; i < 32; i++) {
@@ -2978,10 +3071,9 @@ function updateRegistersFromCurrentValues() {
             changed ? "changed" : ""
         } ${roleClass}" data-register="${regName}">
             <span class="reg-name">${regName}</span>
-            <span class="reg-value ${changed ? "changed" : ""}">0x${parseInt(currentValue, 16)
-            .toString(16)
-            .padStart(8, "0")
-            .toUpperCase()}</span>
+            <span class="reg-value ${changed ? "changed" : ""}">${formatNumberByDisplayOption(
+            currentValue
+        )}</span>
             <span class="reg-alias">${alias}</span>
         </div>`;
 

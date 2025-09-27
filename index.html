@@ -51,6 +51,25 @@
                 <i class="fas fa-stop"></i>
                 Stop
             </button>
+            <div class="spacer"></div>
+            <div class="toolbar-controls">
+                <select id="numberFormat" title="Number display format">
+                    <option value="hex">Hex</option>
+                    <option value="dec">Dec</option>
+                    <option value="bin">Bin</option>
+                    <option value="oct">Oct</option>
+                </select>
+                <input id="memAddr" placeholder="0x10000000" title="Memory address" size="12">
+                <button id="memBtn" title="Examine memory">
+                    <i class="fas fa-search"></i>
+                    Mem
+                </button>
+                <input id="gotoAddress" placeholder="Address/Label" title="Go to address" size="10">
+                <button id="gotoBtn" title="Navigate to address">
+                    <i class="fas fa-crosshairs"></i>
+                    Go
+                </button>
+            </div>
         </div>
 
         <div class="quickbar">
@@ -101,7 +120,6 @@
             <div class="control-group">
                 <span class="group-label">Memory</span>
                 <div>
-                    <input id="memAddr" placeholder="0x10000000" title="Memory address or register">
                     <select id="memFormat" title="Display format">
                         <option value="x">Hex</option>
                         <option value="d">Decimal</option>
@@ -110,10 +128,6 @@
                         <option value="c">Char</option>
                     </select>
                     <input id="memLen" placeholder="16" size="4" title="Number of units">
-                    <button id="memBtn" title="Examine memory">
-                        <i class="fas fa-search"></i>
-                        Examine
-                    </button>
                 </div>
             </div>
 
@@ -135,12 +149,6 @@
             <div class="control-group">
                 <span class="group-label">Display Options</span>
                 <div>
-                    <select id="numberFormat" title="Number display format">
-                        <option value="hex">Hexadecimal</option>
-                        <option value="dec">Decimal</option>
-                        <option value="bin">Binary</option>
-                        <option value="oct">Octal</option>
-                    </select>
                     <select id="memoryWordsPerRow" title="Memory words per row">
                         <option value="1">1 word/row</option>
                         <option value="2">2 words/row</option>
@@ -148,17 +156,6 @@
                         <option value="8">8 words/row</option>
                         <option value="16">16 words/row</option>
                     </select>
-                </div>
-            </div>
-
-            <div class="control-group">
-                <span class="group-label">Navigation</span>
-                <div>
-                    <input id="gotoAddress" placeholder="Address/Label" title="Go to address or label">
-                    <button id="gotoBtn" title="Navigate to address">
-                        <i class="fas fa-crosshairs"></i>
-                        Go To
-                    </button>
                 </div>
             </div>
         </div>
