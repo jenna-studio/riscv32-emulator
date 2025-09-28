@@ -1,0 +1,459 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RISC-V 32 Emulator IDE</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="./styles.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.0/min/vs/loader.min.js"></script>
+    <script>
+        const monacoCdnBase = "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.0/min";
+
+        window.MonacoEnvironment = {
+            getWorkerUrl: function () {
+                const workerSource = `self.MonacoEnvironment = { baseUrl: '${monacoCdnBase}/' };\n` +
+                    `importScripts('${monacoCdnBase}/vs/base/worker/workerMain.js');`;
+                const blob = new Blob([workerSource], { type: "text/javascript" });
+                return URL.createObjectURL(blob);
+            },
+        };
+
+        if (typeof require !== "undefined" && require.config) {
+            require.config({ paths: { vs: `${monacoCdnBase}/vs` } });
+        }
+    </script>
+</head>
+
+<body>
+    <div class="app-container">
+        <div class="toolbar">
+            <button id="pick">
+                <i class="fas fa-folder-open"></i>
+                Open .s
+            </button>
+            <button id="newFile">
+                <i class="fas fa-plus"></i>
+                New .s
+            </button>
+            <span id="asmLabel">No file selected</span>
+            <div class="spacer"></div>
+            <div class="left-controls">
+                <div class="file-controls">
+                    <select id="numberFormat" title="Number display format">
+                        <option value="hex">Hex</option>
+                        <option value="dec">Dec</option>
+                        <option value="bin">Bin</option>
+                        <option value="oct">Oct</option>
+                    </select>
+                    <input id="gotoAddress" placeholder="Address/Label" title="Go to address" size="10">
+                    <button id="gotoBtn" title="Navigate to address">
+                        <i class="fas fa-crosshairs"></i>
+                        Go
+                    </button>
+                </div>
+                <div class="memory-controls">
+                    <input id="memAddr" placeholder="0x10000000" title="Memory address" size="12">
+                    <select id="memFormat" title="Display format">
+                        <option value="x">Hex</option>
+                        <option value="d">Decimal</option>
+                        <option value="u">Unsigned</option>
+                        <option value="t">Binary</option>
+                        <option value="c">Char</option>
+                    </select>
+                    <input id="memLen" placeholder="16" size="4" title="Number of units">
+                    <button id="memBtn" title="Examine memory">
+                        <i class="fas fa-search"></i>
+                        Mem
+                    </button>
+                </div>
+            </div>
+            <div class="compile-controls">
+                <button id="compileAndLoad">
+                    <i class="fas fa-cogs"></i>
+                    Compile and Load
+                </button>
+                <button id="reload">
+                    <i class="fas fa-sync-alt"></i>
+                    Reload
+                </button>
+                <button id="stop">
+                    <i class="fas fa-stop"></i>
+                    Stop
+                </button>
+            </div>
+        </div>
+
+        <div class="quickbar">
+            <div class="control-group">
+                <span class="group-label">Debug Control</span>
+                <div>
+                    <button data-cmd="s" title="Step Into - Execute one instruction" class="debug-btn">
+                        <i class="fas fa-step-forward"></i>
+                        Step Into
+                    </button>
+                    <button data-cmd="s100" title="Continue - Run 100 steps" class="debug-btn">
+                        <i class="fas fa-play"></i>
+                        Continue
+                    </button>
+                    <button data-cmd="r" title="Run program from beginning" class="debug-btn success">
+                        <i class="fas fa-redo"></i>
+                        Run
+                    </button>
+                    <button data-cmd="q" title="Stop execution" class="debug-btn danger">
+                        <i class="fas fa-stop"></i>
+                        Stop
+                    </button>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <span class="group-label">View</span>
+                <div>
+                    <button data-cmd="info registers" title="Show all registers with values">
+                        <i class="fas fa-microchip"></i>
+                        Registers
+                    </button>
+                    <button data-cmd="list" title="List source code around current PC">
+                        <i class="fas fa-file-code"></i>
+                        Source
+                    </button>
+                    <button data-cmd="disassemble" title="Show disassembly">
+                        <i class="fas fa-code"></i>
+                        Disassembly
+                    </button>
+                    <button data-cmd="info program" title="Show program status">
+                        <i class="fas fa-info-circle"></i>
+                        Status
+                    </button>
+                </div>
+            </div>
+
+
+            <div class="control-group">
+                <span class="group-label">Breakpoints</span>
+                <div>
+                    <input id="bpLine" placeholder="line#" title="Line number">
+                    <button id="bpSet" title="Set breakpoint">
+                        <i class="fas fa-circle"></i>
+                        Set
+                    </button>
+                    <button id="bpDel" title="Delete breakpoint">
+                        <i class="fas fa-times"></i>
+                        Del
+                    </button>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <span class="group-label">Display Options</span>
+                <div>
+                    <select id="memoryWordsPerRow" title="Memory words per row">
+                        <option value="1">1 word/row</option>
+                        <option value="2">2 words/row</option>
+                        <option value="4" selected>4 words/row</option>
+                        <option value="8">8 words/row</option>
+                        <option value="16">16 words/row</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-layout">
+            <div class="sidebar">
+                <div class="sidebar-header">
+                    <i class="fas fa-folder"></i>
+                    Files
+                    <div class="sidebar-actions">
+                        <button id="chooseFolder" class="mini">Set Folder</button>
+                        <button id="refreshFiles" class="mini" title="Refresh file lists">↻</button>
+                    </div>
+                </div>
+                <div class="file-list">
+                    <div class="section">
+                        <div class="section-title">Workspace</div>
+                        <div class="file-section" id="workspaceList"></div>
+                    </div>
+                    <div class="section">
+                        <div class="section-title">Example Files</div>
+                        <div class="file-section" id="examplesList"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="editor-panel">
+                <div class="editor-header">
+                    <i class="fas fa-keyboard"></i>
+                    <span id="editorTitle">Assembly Editor</span>
+                    <div class="button-group">
+                        <button id="toggleView" class="save-btn" title="Switch between ASM and C" disabled>
+                            <i class="fas fa-exchange-alt"></i>
+                            Switch View
+                        </button>
+                        <button id="formatCode" class="save-btn">
+                            <i class="fas fa-check"></i>
+                            Format
+                        </button>
+                        <button id="clearEditor" class="save-btn" title="Clear editor">
+                            <i class="fas fa-eraser"></i>
+                            Clear
+                        </button>
+                        <button id="saveFile" class="save-btn" disabled>
+                            <i class="fas fa-save"></i>
+                            Save
+                        </button>
+                    </div>
+                </div>
+                <div class="editor-container" id="editorContainer"></div>
+            </div>
+
+            <div class="output-panel">
+                <div class="panel-tabs">
+                    <button class="tab-btn active" data-panel="terminal">
+                        <i class="fas fa-terminal"></i>
+                        Terminal
+                    </button>
+                    <button class="tab-btn" data-panel="registers">
+                        <i class="fas fa-microchip"></i>
+                        Registers
+                    </button>
+                    <button class="tab-btn" data-panel="memory">
+                        <i class="fas fa-memory"></i>
+                        Memory
+                    </button>
+                    <button class="tab-btn" data-panel="source">
+                        <i class="fas fa-code"></i>
+                        Source
+                    </button>
+                    <button class="tab-btn" data-panel="disassembly">
+                        <i class="fas fa-cogs"></i>
+                        Disassembly
+                    </button>
+                    <button class="tab-btn" data-panel="statistics">
+                        <i class="fas fa-chart-bar"></i>
+                        Statistics
+                    </button>
+                    <button class="tab-btn" data-panel="symbols">
+                        <i class="fas fa-tags"></i>
+                        Symbol Table
+                    </button>
+                    <button class="tab-btn" data-panel="callstack">
+                        <i class="fas fa-layer-group"></i>
+                        Call Stack
+                    </button>
+                </div>
+
+                <div class="panel-content">
+                    <div class="panel active" id="terminal-panel">
+                        <div class="terminal-container" id="terminalContainer"></div>
+                    </div>
+
+                    <div class="panel" id="registers-panel">
+                        <div class="registers-container" id="registersContainer">
+                            <div class="registers-legend">
+                                <div class="legend-item">
+                                    <div class="legend-swatch reg-role-zero"></div>
+                                    <span>Constant 0 (x0)</span>
+                                </div>
+                                <div class="legend-item">
+                                    <div class="legend-swatch reg-role-ra"></div>
+                                    <span>Return Address (x1/ra)</span>
+                                </div>
+                                <div class="legend-item">
+                                    <div class="legend-swatch reg-role-sp"></div>
+                                    <span>Stack Pointer (x2/sp)</span>
+                                </div>
+                                <div class="legend-item">
+                                    <div class="legend-swatch reg-role-gp"></div>
+                                    <span>Global Pointer (x3/gp)</span>
+                                </div>
+                                <div class="legend-item">
+                                    <div class="legend-swatch reg-role-tp"></div>
+                                    <span>Thread Pointer (x4/tp)</span>
+                                </div>
+                                <div class="legend-item">
+                                    <div class="legend-swatch reg-role-temp"></div>
+                                    <span>Temporaries (t0-t6)</span>
+                                </div>
+                                <div class="legend-item">
+                                    <div class="legend-swatch reg-role-fp"></div>
+                                    <span>Frame Pointer (x8/s0/fp)</span>
+                                </div>
+                                <div class="legend-item">
+                                    <div class="legend-swatch reg-role-saved"></div>
+                                    <span>Saved Registers (s1-s11)</span>
+                                </div>
+                                <div class="legend-item">
+                                    <div class="legend-swatch reg-role-argret"></div>
+                                    <span>Args/Returns (a0-a1)</span>
+                                </div>
+                                <div class="legend-item">
+                                    <div class="legend-swatch reg-role-arg"></div>
+                                    <span>Arguments (a2-a7)</span>
+                                </div>
+                            </div>
+                            <div class="registers-grid" id="registersGrid"></div>
+                        </div>
+                    </div>
+
+                    <div class="panel" id="memory-panel">
+                        <div class="memory-container" id="memoryContainer">
+                            <div class="memory-controls">
+                                <input id="memoryAddr" placeholder="0x1000" title="Memory address">
+                                <input id="memoryLen" placeholder="64" size="6" title="Number of bytes">
+                                <button id="memoryRefresh" title="Refresh memory view">
+                                    <i class="fas fa-sync"></i>
+                                    Refresh
+                                </button>
+                            </div>
+                            <div class="memory-display" id="memoryDisplay"></div>
+                        </div>
+                    </div>
+
+                    <div class="panel" id="source-panel">
+                        <div class="source-container" id="sourceContainer">
+                            <div class="source-view" id="sourceView"></div>
+                        </div>
+                    </div>
+
+                    <div class="panel" id="disassembly-panel">
+                        <div class="disassembly-container">
+                            <div class="disassembly-controls">
+                                <input id="disasmAddr" placeholder="0x400000" title="Start address">
+                                <input id="disasmCount" placeholder="20" size="6" title="Number of instructions"
+                                    value="20">
+                                <button id="disasmRefresh" title="Refresh disassembly">
+                                    <i class="fas fa-sync"></i>
+                                    Refresh
+                                </button>
+                            </div>
+                            <div class="disassembly-display" id="disassemblyDisplay">
+                                <div class="disasm-header">
+                                    <span>Address</span>
+                                    <span>Opcode</span>
+                                    <span>Instruction</span>
+                                    <span>Comment</span>
+                                </div>
+                                <div class="disasm-content" id="disasmContent">
+                                    <!-- Disassembly content will be populated here -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel" id="statistics-panel">
+                        <div class="statistics-container">
+                            <div class="stats-grid">
+                                <div class="stat-item">
+                                    <span class="stat-label">Instructions Executed:</span>
+                                    <span class="stat-value" id="statInstructions">0</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Cycles:</span>
+                                    <span class="stat-value" id="statCycles">0</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Program<br>Counter:</span>
+                                    <span class="stat-value" id="statPC">0x00000000</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Stack<br>Pointer:</span>
+                                    <span class="stat-value" id="statSP">0x00000000</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Branch Instructions:</span>
+                                    <span class="stat-value" id="statBranches">0</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Load/Store<br>Instructions:</span>
+                                    <span class="stat-value" id="statMemAccess">0</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Arithmetic Instructions:</span>
+                                    <span class="stat-value" id="statArithmetic">0</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">System Calls:</span>
+                                    <span class="stat-value" id="statSyscalls">0</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel" id="symbols-panel">
+                        <div class="symbols-container">
+                            <div class="symbols-controls">
+                                <select id="symbolFilter">
+                                    <option value="all">All Symbols</option>
+                                    <option value="functions">Functions</option>
+                                    <option value="labels">Labels</option>
+                                    <option value="data">Data</option>
+                                </select>
+                                <button id="refreshSymbols" title="Refresh symbol table">
+                                    <i class="fas fa-sync"></i>
+                                    Refresh
+                                </button>
+                            </div>
+                            <div class="symbols-display">
+                                <div class="symbols-header">
+                                    <span>Name</span>
+                                    <span>Address</span>
+                                    <span>Type</span>
+                                    <span>Size</span>
+                                    <span>Section</span>
+                                </div>
+                                <div class="symbols-content" id="symbolsContent">
+                                    <!-- Symbol table content will be populated here -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel" id="callstack-panel">
+                        <div class="callstack-container">
+                            <div class="callstack-controls">
+                                <button id="refreshCallstack" title="Refresh call stack">
+                                    <i class="fas fa-sync"></i>
+                                    Refresh
+                                </button>
+                                <span class="callstack-info">
+                                    Current depth: <span id="callDepth">0</span>
+                                </span>
+                            </div>
+                            <div class="callstack-display">
+                                <div class="callstack-header">
+                                    <span>Function</span>
+                                    <span>Address</span>
+                                    <span>Return Address</span>
+                                    <span>Source Line</span>
+                                </div>
+                                <div class="callstack-content" id="callstackContent">
+                                    <div class="callstack-empty">
+                                        <i class="fas fa-info-circle"></i>
+                                        No active function calls
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="cmdbar">
+            <input id="cmd" placeholder="Enter debugger command (ex: m0x1000 16, b5, s, c, r, l)">
+            <button id="send">
+                <i class="fas fa-paper-plane"></i>
+                Send
+            </button>
+            <button id="clearTerminal" title="Clear terminal output">
+                <i class="fas fa-sync"></i>
+                Clear
+            </button>
+        </div>
+    </div>
+    <script src="./renderer.js" defer></script>
+</body>
+
+</html>

@@ -1,5 +1,5 @@
-#include <stdio.h>
-#include <stdint.h>
+#include <cstdint>
+#include <cstdint>
 
 #ifndef CACHESIM_H__
 #define CACHESIM_H__
@@ -19,10 +19,17 @@
 #define CACHE_LINE_WORD (1<<CACHE_LINE_WORD_SZ)
 
 
-int cache_peek(uint32_t addr, int bytes);
-void cache_write(uint32_t addr, uint32_t data, int bytes);
-uint32_t cache_read(uint32_t addr, int bytes) ;
-void cache_update(uint32_t addr, uint32_t data);
-void cache_flush(uint32_t addr, uint8_t* mem);
+// Stats
+extern uint32_t mem_read_reqs;
+extern uint32_t mem_write_reqs;
+extern uint32_t cache_read_hits;
+extern uint32_t cache_write_hits;
+extern uint32_t mem_flush_words;
+
+
+// Functions
+void cache_init();
+uint32_t mem_read(uint8_t* mem, uint32_t addr, uint32_t size);
+void mem_write(uint8_t* mem, uint32_t addr, uint32_t data, uint32_t size);
 
 #endif
