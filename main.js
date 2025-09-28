@@ -148,15 +148,35 @@ ipcMain.handle("run-emu", async (_evt, asmPath) => {
         return { ok: false, error };
     }
 
+    // Ensure we use absolute paths for the emulator
+    const absolutePath = path.isAbsolute(asmPath) ? asmPath : path.resolve(__dirname, asmPath);
+
+    console.log(`Starting emulator with file: ${asmPath}`);
+    console.log(`Absolute path: ${absolutePath}`);
+    console.log(`Working directory: ${__dirname}`);
+    console.log(`Executable path: ${exe}`);
+    console.log(`File exists check (original): ${existsSync(asmPath)}`);
+    console.log(`File exists check (absolute): ${existsSync(absolutePath)}`);
+    console.log(`Is packaged: ${app.isPackaged}`);
+
+    // Double-check that the absolute path file exists
+    if (!existsSync(absolutePath)) {
+        const error = `Assembly file not found at absolute path: ${absolutePath}`;
+        console.error("Assembly file not found at absolute path:", error);
+        return { ok: false, error };
+    }
+
     try {
-        child = spawn(exe, [asmPath], { cwd: __dirname });
+        child = spawn(exe, [absolutePath], { cwd: __dirname });
         child.stdout.setEncoding("utf8");
         child.stderr.setEncoding("utf8");
 
         child.stdout.on("data", (chunk) => {
+            console.log("Emulator stdout:", chunk);
             win.webContents.send("emu-output", chunk);
         });
         child.stderr.on("data", (chunk) => {
+            console.log("Emulator stderr:", chunk);
             win.webContents.send("emu-output", chunk);
         });
         child.on("error", (error) => {
@@ -165,6 +185,10 @@ ipcMain.handle("run-emu", async (_evt, asmPath) => {
             child = null;
         });
         child.on("close", (code) => {
+            console.log(`Emulator process exited with code: ${code}`);
+            if (code !== 0) {
+                console.error(`Emulator failed with exit code ${code}`);
+            }
             win.webContents.send("emu-output", `\n[process exited with code ${code}]\n`);
             child = null;
         });

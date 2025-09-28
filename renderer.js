@@ -2467,10 +2467,7 @@ function updateMemoryDisplay(memoryOutput) {
         if (!match) return;
 
         const address = match[1].trim();
-        const rawValues = match[2]
-            .trim()
-            .split(/\s+/)
-            .filter(Boolean);
+        const rawValues = match[2].trim().split(/\s+/).filter(Boolean);
         if (rawValues.length === 0) return;
 
         let ascii = "";
@@ -3451,9 +3448,12 @@ function updateDisassemblyDisplay(disasmOutput) {
             const [, address, opcode, instruction] = match;
             const normalizedAddr = address.toLowerCase();
             const displayAddr = `0x${normalizedAddr}`;
-            const isCurrentPC = (currentRegisterValues["pc"] || "").toLowerCase() === normalizedAddr;
+            const isCurrentPC =
+                (currentRegisterValues["pc"] || "").toLowerCase() === normalizedAddr;
 
-            html += `<div class="disasm-line ${isCurrentPC ? "current-pc" : ""}" data-address="${normalizedAddr}">
+            html += `<div class="disasm-line ${
+                isCurrentPC ? "current-pc" : ""
+            }" data-address="${normalizedAddr}">
                 <span class="disasm-addr">${displayAddr}</span>
                 <span class="disasm-opcode">${opcode.trim()}</span>
                 <span class="disasm-instr">${escapeHtml(instruction)}</span>
@@ -3469,9 +3469,12 @@ function updateDisassemblyDisplay(disasmOutput) {
                 const displayAddr = address.startsWith("0x")
                     ? address.toLowerCase()
                     : `0x${normalizedAddr}`;
-                const isCurrentPC = (currentRegisterValues["pc"] || "").toLowerCase() === normalizedAddr;
+                const isCurrentPC =
+                    (currentRegisterValues["pc"] || "").toLowerCase() === normalizedAddr;
 
-                html += `<div class="disasm-line ${isCurrentPC ? "current-pc" : ""}" data-address="${normalizedAddr}">
+                html += `<div class="disasm-line ${
+                    isCurrentPC ? "current-pc" : ""
+                }" data-address="${normalizedAddr}">
                     <span class="disasm-addr">${displayAddr}</span>
                     <span class="disasm-opcode">--</span>
                     <span class="disasm-instr">${escapeHtml(rest)}</span>
