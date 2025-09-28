@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+obj/
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Electron
+electron.log
+electron-trace-test.log
+
+# IDE files
+.vscode/
+.idea/

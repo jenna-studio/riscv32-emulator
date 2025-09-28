@@ -1,39 +1,226 @@
-# rv32emulator
+# RISC-V 32-bit Emulator IDE
 
-## Building and running
+A comprehensive RISC-V 32-bit processor emulator with an integrated development environment (IDE) built using Electron, featuring Monaco Editor and xterm.js for a modern debugging experience.
 
-Build using `make`
+## References
 
-Run using `./obj/emulator [assembly file path]`
+This project was developed with reference to the [CPUlator Computer System Simulator](https://cpulator.01xz.net/?sys=rv32-spim), which provided valuable insights into RISC-V processor simulation and educational interface design.
 
-## Assembly Syntax
+**Note**: This repository is forked from an original implementation. Please refer to the git history and contributors for the complete development lineage.
 
-Terms should be separated by whitespace! e.g., "add s0 s1 s2"
-Commas and other delimiters are not support at the moment.
+## Features
 
-## Debugging commands
+### 🚀 Core Emulation
 
-Execution will result in a command prompt, preceded by some information about the instruction to execute next.
-For example:
+-   **RISC-V 32-bit ISA Support**: Full implementation of RV32I base instruction set
+-   **Cache Simulation**: Built-in cache performance modeling
+-   **Real-time Execution**: Step-by-step instruction execution with debugging capabilities
+-   **Memory Management**: Complete memory examination and manipulation tools
+
+### 💻 Integrated Development Environment
+
+-   **Monaco Editor**: VS Code-style editor with syntax highlighting for RISC-V assembly
+-   **Dual View Support**: Switch between Assembly (.s) and C (.c) files seamlessly
+-   **File Management**: Workspace folder support with example programs included
+-   **Syntax Highlighting**: Custom RISC-V assembly language support
+
+### 🔧 Advanced Debugging Tools
+
+-   **Real-time Register Display**: Live register values with role-based color coding
+-   **Memory Inspector**: Examine memory contents with multiple display formats (hex, decimal, binary, char)
+-   **Disassembly Viewer**: Interactive disassembly with current instruction highlighting
+-   **Source Code Mapping**: Synchronized source code and execution views
+-   **Call Stack Tracking**: Function call hierarchy visualization
+-   **Symbol Table**: Complete symbol and label information display
+
+### 📊 Performance Analysis
+
+-   **Execution Statistics**: Track instructions executed, cycles, branches, and memory accesses
+-   **Instruction Categorization**: Separate counters for arithmetic, branches, loads/stores, and system calls
+-   **Performance Counters**: Real-time performance metrics and analysis
+
+### 🎮 Interactive Controls
+
+-   **Step Execution**: Single-step through instructions with "Step Into" functionality
+-   **Breakpoint Management**: Set and manage breakpoints at specific line numbers
+-   **Navigation Tools**: Quick jump to addresses, labels, or line numbers
+-   **Memory Examination**: Direct memory access with configurable format and length
+-   **Terminal Interface**: Full GDB-style command interface
+
+## Installation
+
+### Prerequisites
+
+-   Node.js (v16 or higher)
+-   npm or yarn
+-   C++ compiler (for building the emulator core)
+-   Make (for building the emulator binary)
+
+### Setup
+
+1. **Clone the repository**
+
+    ```bash
+    git clone <repository-url>
+    cd riscv32-emulator
+    ```
+
+2. **Install dependencies**
+
+    ```bash
+    npm install
+    ```
+
+3. **Build the emulator core**
+
+    ```bash
+    npm run build-emu
+    # or manually:
+    make
+    ```
+
+4. **Start the application**
+    ```bash
+    npm start
+    # or for development with logging:
+    npm run dev
+    ```
+
+## Usage
+
+### Getting Started
+
+1. **Load Assembly Files**: Use "Open .s" to load RISC-V assembly files or "New .s" to create new ones
+2. **Compile and Load**: Click "Compile and Load" to prepare your program for execution
+3. **Set Breakpoints**: Click on line numbers or use the breakpoint controls
+4. **Execute**: Use "Step Into" for single-step debugging or "Continue" for running multiple instructions
+
+### Debug Controls
+
+-   **Step Into**: Execute one instruction at a time
+-   **Continue**: Run 100 instructions (or until breakpoint)
+-   **Run**: Execute program from the beginning
+-   **Stop**: Halt execution
+
+### Navigation
+
+-   **Go Button**: Jump to specific line numbers, addresses, or labels
+-   **Mem Button**: Examine memory at specific addresses
+-   **Status Button**: View comprehensive program status
+
+### Panel Overview
+
+-   **Terminal**: Interactive command interface with GDB-style commands
+-   **Registers**: Real-time register display with ABI names and roles
+-   **Memory**: Formatted memory inspection with multiple display options
+-   **Source**: Current source code with execution highlighting
+-   **Disassembly**: Machine code disassembly with instruction details
+-   **Statistics**: Performance metrics and instruction counters
+-   **Symbol Table**: Program symbols, functions, and labels
+-   **Call Stack**: Function call hierarchy and return addresses
+
+## Example Programs
+
+The IDE includes several example programs in the `example_questions/` directory:
+
+-   **Graph Algorithms** (`graph.c/s`): Graph traversal and manipulation
+-   **Array Reduction** (`reduction.c/s`): Parallel reduction operations
+-   **Sorting Algorithms** (`sort.c/s`): Various sorting implementations
+-   **Sudoku Solver** (`sudoku.c/s`): Constraint satisfaction problem solving
+
+## Building for Distribution
+
+### Development Build
+
+```bash
+npm run dev
+```
+
+### Production Builds
+
+```bash
+# Build for current platform
+npm run build
+
+# Platform-specific builds
+npm run build:mac    # macOS DMG
+npm run build:win    # Windows NSIS installer
+npm run build:linux  # Linux AppImage
+```
+
+## Architecture
+
+### Frontend (Electron + Web Technologies)
+
+-   **main.js**: Electron main process, handles window management and IPC
+-   **renderer.js**: Main application logic, UI interactions, and emulator communication
+-   **preload.js**: Secure bridge between main and renderer processes
+-   **index.html**: Application structure and layout
+-   **styles.css**: Complete styling and responsive design
+
+### Backend (C++ Emulator Core)
+
+-   **emulator.cpp**: Main RISC-V processor emulation engine
+-   **cachesim.cpp/h**: Cache simulation and performance modeling
+-   **linenoise.hpp**: Command-line interface library
+
+### Key Technologies
+
+-   **Electron**: Cross-platform desktop application framework
+-   **Monaco Editor**: VS Code editor component for code editing
+-   **xterm.js**: Terminal emulator for interactive debugging
+-   **C++11**: High-performance emulator core implementation
+
+## Development
+
+### Project Structure
 
 ```
-Next: lui x02, 0x00000010
-[inst:      1 pc:      0, src line    3] 
->> 
+riscv32-emulator/
+├── main.js                 # Electron main process
+├── renderer.js             # Frontend application logic
+├── preload.js              # IPC bridge
+├── index.html              # Application UI structure
+├── styles.css              # Styling and layout
+├── package.json            # Dependencies and scripts
+├── Makefile                # Emulator build configuration
+├── emulator.cpp            # RISC-V emulator core
+├── cachesim.cpp/h          # Cache simulation
+├── linenoise.hpp           # Command line interface
+├── example_questions/      # Example RISC-V programs
+├── obj/                   # Build output directory
+└── dist/                  # Distribution builds
 ```
 
-The following are the supported commands:
+### Key Features Implementation
 
-* s, or [blank] : Step to the next instruction
-* c : Continue execution until termination
-* r : Reads the value of the registers. Both register number and alas formats can be used, without space after 'r'. e.g., `rx0`, `rra`. A simple `r` with no trailing register name will print all registers
-* m : Reads memory values. Memory address prefixed with m (e.g., `m0x1000` or `m1024`) will print four bytes starting from that address. If you want to read more values, give the number of bytes as a parameger. e.g., `m0x1000 16`.
-* b : Set breakpoint. e.g., `b17` to set a breakpoint at source code line 17. The list of existing breakpoints can be seen with a simple `b` with no suffixes. Breakpoints can be removed with an uppercase `B`. e.g., `B16`.
-* l : `l` with no arguments will print the compiled hardware instructions (after translating pseudo-instructions), each with its line number from the original source file.
-* q : `q` with no arguments will exit the emulator
+-   **Real-time Debugging**: Synchronized execution state across all panels
+-   **Memory Management**: Comprehensive memory inspection with multiple formats
+-   **Performance Monitoring**: Live instruction and performance counters
+-   **Cross-platform**: Native builds for macOS, Windows, and Linux
+-   **Extensible**: Modular design for easy feature additions
 
+## Contributing
 
-## Caveats
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-* Pseudo-instructions are not elegantly compiled, yet
-* Only one action per line supported! For example, comments and labels shoud go on their own line
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+-   [CPUlator Computer System Simulator](https://cpulator.01xz.net/?sys=rv32-spim) for reference and inspiration in RISC-V simulation design
+-   RISC-V Foundation for the excellent ISA specification
+-   Monaco Editor team for the powerful code editor
+-   xterm.js team for the terminal emulator
+-   Electron team for the cross-platform framework
+-   Original repository contributors and maintainers
+
+---
+
+**Built with ❤️ for RISC-V education and development**
