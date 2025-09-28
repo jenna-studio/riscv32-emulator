@@ -65,6 +65,19 @@ ipcMain.handle("pick-asm", async () => {
 });
 
 ipcMain.handle("build-emu", async () => {
+    // Check if emulator executable already exists
+    const exe = path.join(__dirname, "obj", "emulator");
+
+    if (existsSync(exe)) {
+        // In packaged app or emulator already built, skip compilation
+        console.log("Emulator executable found, skipping compilation");
+        return {
+            code: 0,
+            out: "Emulator already compiled and ready to use.\nBuild skipped in packaged application.\n"
+        };
+    }
+
+    // Only try to compile if in development environment
     return new Promise((resolve) => {
         // Run make in the current directory where Makefile is located
         const proc = spawn(process.platform === "win32" ? "make.exe" : "make", [], {
@@ -83,6 +96,8 @@ ipcMain.handle("build-emu", async () => {
         proc.on("error", (error) => {
             console.error("Build process error:", error);
             out += `Process error: ${error.message}\n`;
+            out += `This may happen in packaged applications where development tools are not available.\n`;
+            out += `The emulator should already be pre-compiled and included with the application.\n`;
         });
 
         proc.on("close", (code) => {
