@@ -10,12 +10,13 @@
         "start": "electron .",
         "build-emu": "make",
         "dev": "electron . --enable-logging",
+        "prebuild": "npm run build-emu",
         "build": "electron-builder",
-        "build:mac": "electron-builder --mac",
-        "build:win": "electron-builder --win",
-        "build:linux": "electron-builder --linux",
+        "build:mac": "npm run prebuild && electron-builder --mac",
+        "build:win": "npm run prebuild && electron-builder --win",
+        "build:linux": "npm run prebuild && electron-builder --linux",
         "dist": "npm run build",
-        "pack": "electron-builder --dir",
+        "pack": "npm run prebuild && electron-builder --dir",
         "postinstall": "electron-builder install-app-deps"
     },
     "build": {

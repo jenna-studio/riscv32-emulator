@@ -138,15 +138,43 @@ npm run dev
 
 ### Production Builds
 
+The build process automatically compiles the RISC-V emulator before packaging to ensure the latest version is included.
+
 ```bash
-# Build for current platform
+# Build for current platform (automatically runs prebuild)
 npm run build
 
-# Platform-specific builds
+# Platform-specific builds (all include automatic prebuild)
 npm run build:mac    # macOS DMG
 npm run build:win    # Windows NSIS installer
 npm run build:linux  # Linux AppImage
 ```
+
+### Build Process Details
+
+Each build command now includes these steps:
+
+1. **Prebuild**: Compiles the C++ emulator core (`make`)
+2. **Package**: Creates the Electron application bundle
+3. **Distribute**: Generates platform-specific installers
+
+### Troubleshooting Build Issues
+
+**Volume mounting issues on macOS:**
+If you encounter `hdiutil detach` errors during build:
+
+```bash
+# Force unmount any stuck volumes
+diskutil unmount force "/Volumes/RISC-V Emulator IDE 1.0.0-arm64"
+# Then retry the build
+npm run build:mac
+```
+
+**Compilation in packaged apps:**
+
+-   The app automatically detects if it's running in a packaged environment
+-   Pre-compiled emulator binaries are included in all distributions
+-   Build functionality shows appropriate messages based on the environment
 
 ## Architecture
 

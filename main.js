@@ -67,21 +67,38 @@ ipcMain.handle("pick-asm", async () => {
 ipcMain.handle("build-emu", async () => {
     // Check if emulator executable already exists
     const exe = path.join(__dirname, "obj", "emulator");
+    const isPackaged = app.isPackaged;
 
     if (existsSync(exe)) {
         // In packaged app or emulator already built, skip compilation
         console.log("Emulator executable found, skipping compilation");
         return {
             code: 0,
-            out: "Emulator already compiled and ready to use.\nBuild skipped in packaged application.\n"
+            out:
+                "✅ Emulator already compiled and ready to use.\n" +
+                (isPackaged
+                    ? "Build skipped in packaged application.\n"
+                    : "Build not needed - emulator already exists.\n"),
+        };
+    }
+
+    // If packaged but no emulator found, that's an error
+    if (isPackaged) {
+        const error =
+            "❌ Emulator executable not found in packaged application. This is a packaging error.";
+        console.error(error);
+        return {
+            code: 1,
+            out: error + "\nThe application should include a pre-compiled emulator binary.\n",
         };
     }
 
     // Only try to compile if in development environment
     return new Promise((resolve) => {
+        console.log("Attempting to compile emulator in development mode...");
         // Run make in the current directory where Makefile is located
         const proc = spawn(process.platform === "win32" ? "make.exe" : "make", [], {
-            cwd: __dirname
+            cwd: __dirname,
         });
         let out = "";
 
@@ -95,12 +112,18 @@ ipcMain.handle("build-emu", async () => {
 
         proc.on("error", (error) => {
             console.error("Build process error:", error);
-            out += `Process error: ${error.message}\n`;
-            out += `This may happen in packaged applications where development tools are not available.\n`;
-            out += `The emulator should already be pre-compiled and included with the application.\n`;
+            out += `❌ Build process error: ${error.message}\n`;
+            out += `This may happen if development tools (make, g++) are not available.\n`;
+            out += `Please install the necessary build tools or use a pre-compiled version.\n`;
+            resolve({ code: 1, out });
         });
 
         proc.on("close", (code) => {
+            if (code === 0) {
+                out = "✅ " + out + "\n🎉 Emulator compiled successfully!\n";
+            } else {
+                out = "❌ " + out + "\n💥 Emulator compilation failed!\n";
+            }
             resolve({ code, out });
         });
     });
@@ -175,16 +198,16 @@ ipcMain.handle("stop-emu", async () => {
         }
 
         // Give it a moment to quit gracefully
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await new Promise((resolve) => setTimeout(resolve, 500));
 
         // If still running, force kill
         if (child && !child.killed) {
-            child.kill('SIGTERM');
+            child.kill("SIGTERM");
 
             // Give it another moment, then force kill
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await new Promise((resolve) => setTimeout(resolve, 500));
             if (child && !child.killed) {
-                child.kill('SIGKILL');
+                child.kill("SIGKILL");
             }
         }
 
@@ -195,7 +218,7 @@ ipcMain.handle("stop-emu", async () => {
         // Force cleanup even if there was an error
         if (child) {
             try {
-                child.kill('SIGKILL');
+                child.kill("SIGKILL");
             } catch {}
             child = null;
         }
