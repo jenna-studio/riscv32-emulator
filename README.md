@@ -61,7 +61,7 @@ This project was developed with reference to the [CPUlator Computer System Simul
 1. **Clone the repository**
 
     ```bash
-    git clone <repository-url>
+    git clone https://github.com/jenna-studio/riscv32-emulator.git
     cd riscv32-emulator
     ```
 
@@ -158,23 +158,6 @@ Each build command now includes these steps:
 2. **Package**: Creates the Electron application bundle
 3. **Distribute**: Generates platform-specific installers
 
-### Troubleshooting Build Issues
-
-**Volume mounting issues on macOS:**
-If you encounter `hdiutil detach` errors during build:
-
-```bash
-# Force unmount any stuck volumes
-diskutil unmount force "/Volumes/RISC-V Emulator IDE 1.0.0-arm64"
-# Then retry the build
-npm run build:mac
-```
-
-**Compilation in packaged apps:**
-
--   The app automatically detects if it's running in a packaged environment
--   Pre-compiled emulator binaries are included in all distributions
--   Build functionality shows appropriate messages based on the environment
 
 ## Architecture
 
@@ -228,13 +211,6 @@ riscv32-emulator/
 -   **Cross-platform**: Native builds for macOS, Windows, and Linux
 -   **Extensible**: Modular design for easy feature additions
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
 
 ## License
 
@@ -249,6 +225,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 -   Electron team for the cross-platform framework
 -   Original repository contributors and maintainers
 
----
 
-**Built with ❤️ for RISC-V education and development**

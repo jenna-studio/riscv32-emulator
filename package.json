@@ -32,6 +32,9 @@
             "node_modules/monaco-editor/**/*",
             "node_modules/@xterm/**/*"
         ],
+        "asarUnpack": [
+            "obj/**/*"
+        ],
         "mac": {
             "category": "public.app-category.developer-tools",
             "target": "dmg"

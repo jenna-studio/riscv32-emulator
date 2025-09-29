@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, screen, shell } from "electron";
 import { spawn } from "child_process";
-import { readFile, writeFile, readdir, stat } from "fs/promises";
-import { existsSync } from "fs";
+import { readFile, writeFile, readdir, stat, copyFile, mkdir, chmod } from "fs/promises";
+import { existsSync, mkdirSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import os from "os";
@@ -11,6 +11,167 @@ const __dirname = path.dirname(__filename);
 
 let win = null;
 let child = null;
+let extractedEmulatorPath = null;
+
+const COMMAND_TIMEOUT_MS = 2000;
+const pendingCommandQueue = [];
+
+function hasTrailingPrompt(buffer) {
+    return buffer.endsWith(">> ");
+}
+
+function stripTrailingPrompt(text) {
+    if (text.endsWith(">> ")) {
+        let trimmed = text.slice(0, -3);
+        if (trimmed.endsWith("\r\n")) {
+            return trimmed.slice(0, -2);
+        }
+        if (trimmed.endsWith("\n") || trimmed.endsWith("\r")) {
+            return trimmed.slice(0, -1);
+        }
+        return trimmed;
+    }
+    return text;
+}
+
+function resetPendingCommandTimeout(entry) {
+    if (entry.timeout) {
+        clearTimeout(entry.timeout);
+    }
+    entry.timeout = setTimeout(() => {
+        finalizePendingCommand(entry, { timedOut: true });
+    }, COMMAND_TIMEOUT_MS);
+}
+
+function removePendingEntry(entry) {
+    const index = pendingCommandQueue.indexOf(entry);
+    if (index !== -1) {
+        pendingCommandQueue.splice(index, 1);
+    }
+}
+
+function finalizePendingCommand(entry, { timedOut = false, error = null } = {}) {
+    if (!entry || entry.completed) return;
+
+    entry.completed = true;
+
+    if (entry.timeout) {
+        clearTimeout(entry.timeout);
+        entry.timeout = null;
+    }
+
+    removePendingEntry(entry);
+
+    let output = entry.buffer;
+    if (!timedOut && !error) {
+        output = stripTrailingPrompt(output);
+    }
+    output = output.trimEnd();
+
+    if (error) {
+        entry.resolve({ ok: false, error, output, timedOut });
+        return;
+    }
+
+    if (entry.hadStdErr) {
+        const errorMessage = output.length > 0 ? output : "Command reported errors";
+        entry.resolve({ ok: false, error: errorMessage, output, timedOut });
+        return;
+    }
+
+    entry.resolve({ ok: true, output, timedOut });
+}
+
+function flushPendingCommands({ errorMessage = null, exitCode = null } = {}) {
+    while (pendingCommandQueue.length > 0) {
+        const entry = pendingCommandQueue.shift();
+        if (!entry) continue;
+
+        if (entry.timeout) {
+            clearTimeout(entry.timeout);
+            entry.timeout = null;
+        }
+
+        entry.completed = true;
+        let output = stripTrailingPrompt(entry.buffer).trimEnd();
+
+        if (errorMessage) {
+            entry.resolve({ ok: false, error: errorMessage, output, exitCode, timedOut: false });
+        } else if (entry.hadStdErr) {
+            const errorMessage = output.length > 0 ? output : "Command reported errors";
+            entry.resolve({ ok: false, error: errorMessage, output, exitCode, timedOut: false });
+        } else {
+            entry.resolve({ ok: true, output, exitCode, timedOut: false });
+        }
+    }
+}
+
+function handleEmulatorStreamChunk(chunk, { isError = false } = {}) {
+    if (!pendingCommandQueue.length) {
+        return;
+    }
+
+    const entry = pendingCommandQueue[0];
+    if (!entry || entry.completed) {
+        return;
+    }
+
+    entry.buffer += chunk;
+
+    if (isError) {
+        entry.hadStdErr = true;
+    }
+
+    resetPendingCommandTimeout(entry);
+
+    if (hasTrailingPrompt(entry.buffer)) {
+        finalizePendingCommand(entry);
+    }
+}
+
+async function extractEmulatorIfNeeded() {
+    if (!app.isPackaged) {
+        // In development, use the emulator directly
+        return path.join(__dirname, "obj", "emulator");
+    }
+
+    // In packaged app, use the unpacked binary directly
+    const unpackedEmulator = path.join(app.getAppPath(), "..", "app.asar.unpacked", "obj", "emulator");
+
+    if (existsSync(unpackedEmulator)) {
+        console.log(`Using unpacked emulator: ${unpackedEmulator}`);
+        return unpackedEmulator;
+    }
+
+    // Fallback: extract from asar if unpacked version not available
+    if (extractedEmulatorPath && existsSync(extractedEmulatorPath)) {
+        return extractedEmulatorPath;
+    }
+
+    try {
+        // Create temp directory for emulator
+        const tempDir = path.join(os.tmpdir(), "riscv-emulator");
+        if (!existsSync(tempDir)) {
+            mkdirSync(tempDir, { recursive: true });
+        }
+
+        const sourceEmulator = path.join(app.getAppPath(), "obj", "emulator");
+        const targetEmulator = path.join(tempDir, "emulator");
+
+        // Copy emulator to temp location
+        await copyFile(sourceEmulator, targetEmulator);
+
+        // Make it executable
+        await chmod(targetEmulator, 0o755);
+
+        extractedEmulatorPath = targetEmulator;
+        console.log(`Emulator extracted to: ${extractedEmulatorPath}`);
+        return extractedEmulatorPath;
+    } catch (error) {
+        console.error("Failed to extract emulator:", error);
+        throw error;
+    }
+}
 
 function createWindow() {
     // Get screen dimensions
@@ -65,8 +226,10 @@ ipcMain.handle("pick-asm", async () => {
 });
 
 ipcMain.handle("build-emu", async () => {
+    // Use app.getAppPath() for packaged apps, __dirname for development
+    const appPath = app.isPackaged ? app.getAppPath() : __dirname;
     // Check if emulator executable already exists
-    const exe = path.join(__dirname, "obj", "emulator");
+    const exe = path.join(appPath, "obj", "emulator");
     const isPackaged = app.isPackaged;
 
     if (existsSync(exe)) {
@@ -96,9 +259,11 @@ ipcMain.handle("build-emu", async () => {
     // Only try to compile if in development environment
     return new Promise((resolve) => {
         console.log("Attempting to compile emulator in development mode...");
+        // Use app.getAppPath() for packaged apps, __dirname for development
+        const appPath = app.isPackaged ? app.getAppPath() : __dirname;
         // Run make in the current directory where Makefile is located
         const proc = spawn(process.platform === "win32" ? "make.exe" : "make", [], {
-            cwd: __dirname,
+            cwd: appPath,
         });
         let out = "";
 
@@ -132,55 +297,56 @@ ipcMain.handle("build-emu", async () => {
 ipcMain.handle("run-emu", async (_evt, asmPath) => {
     if (child) return { ok: false, error: "Emulator already running" };
 
-    const exe = path.join(__dirname, "obj", "emulator");
-
-    // Check if the executable exists
-    if (!existsSync(exe)) {
-        const error = `Emulator executable not found: ${exe}`;
-        console.error("Emulator executable not found:", error);
-        return { ok: false, error };
-    }
-
-    // Check if the assembly file exists
-    if (!existsSync(asmPath)) {
-        const error = `Assembly file not found: ${asmPath}`;
-        console.error("Assembly file not found:", error);
-        return { ok: false, error };
-    }
-
-    // Ensure we use absolute paths for the emulator
-    const absolutePath = path.isAbsolute(asmPath) ? asmPath : path.resolve(__dirname, asmPath);
-
-    console.log(`Starting emulator with file: ${asmPath}`);
-    console.log(`Absolute path: ${absolutePath}`);
-    console.log(`Working directory: ${__dirname}`);
-    console.log(`Executable path: ${exe}`);
-    console.log(`File exists check (original): ${existsSync(asmPath)}`);
-    console.log(`File exists check (absolute): ${existsSync(absolutePath)}`);
-    console.log(`Is packaged: ${app.isPackaged}`);
-
-    // Double-check that the absolute path file exists
-    if (!existsSync(absolutePath)) {
-        const error = `Assembly file not found at absolute path: ${absolutePath}`;
-        console.error("Assembly file not found at absolute path:", error);
-        return { ok: false, error };
-    }
-
     try {
-        child = spawn(exe, [absolutePath], { cwd: __dirname });
+        // Extract emulator if needed (for packaged apps)
+        const exe = await extractEmulatorIfNeeded();
+
+        // Check if the executable exists
+        if (!existsSync(exe)) {
+            const error = `Emulator executable not found: ${exe}`;
+            console.error("Emulator executable not found:", error);
+            return { ok: false, error };
+        }
+
+        // Use app.getAppPath() for packaged apps, __dirname for development
+        const appPath = app.isPackaged ? app.getAppPath() : __dirname;
+
+        // Resolve assembly file path relative to app path if not absolute
+        const absolutePath = path.isAbsolute(asmPath) ? asmPath : path.resolve(appPath, asmPath);
+
+        // Check if the assembly file exists
+        if (!existsSync(absolutePath)) {
+            const error = `Assembly file not found: ${absolutePath}`;
+            console.error("Assembly file not found:", error);
+            return { ok: false, error };
+        }
+
+        console.log(`Starting emulator with file: ${asmPath}`);
+        console.log(`Absolute path: ${absolutePath}`);
+        console.log(`App path: ${appPath}`);
+        console.log(`Executable path: ${exe}`);
+        console.log(`File exists check (absolute): ${existsSync(absolutePath)}`);
+        console.log(`Is packaged: ${app.isPackaged}`);
+
+        child = spawn(exe, [absolutePath], { cwd: appPath });
         child.stdout.setEncoding("utf8");
         child.stderr.setEncoding("utf8");
 
         child.stdout.on("data", (chunk) => {
-            console.log("Emulator stdout:", chunk);
-            win.webContents.send("emu-output", chunk);
+            const text = chunk.toString();
+            handleEmulatorStreamChunk(text);
+            console.log("Emulator stdout:", text);
+            win.webContents.send("emu-output", text);
         });
         child.stderr.on("data", (chunk) => {
-            console.log("Emulator stderr:", chunk);
-            win.webContents.send("emu-output", chunk);
+            const text = chunk.toString();
+            handleEmulatorStreamChunk(text, { isError: true });
+            console.log("Emulator stderr:", text);
+            win.webContents.send("emu-output", text);
         });
         child.on("error", (error) => {
             console.error("Emulator process error:", error);
+            flushPendingCommands({ errorMessage: error?.message || "Emulator process error" });
             win.webContents.send("emu-output", `Error: ${error.message}\n`);
             child = null;
         });
@@ -189,6 +355,8 @@ ipcMain.handle("run-emu", async (_evt, asmPath) => {
             if (code !== 0) {
                 console.error(`Emulator failed with exit code ${code}`);
             }
+            const errorMessage = code === 0 ? null : `Emulator exited with code ${code}`;
+            flushPendingCommands({ errorMessage, exitCode: code });
             win.webContents.send("emu-output", `\n[process exited with code ${code}]\n`);
             child = null;
         });
@@ -201,13 +369,37 @@ ipcMain.handle("run-emu", async (_evt, asmPath) => {
 });
 
 ipcMain.handle("send-cmd", async (_evt, line) => {
-    if (!child || child.killed || !child.stdin) return { ok: false, error: "Not running" };
-    try {
-        child.stdin.write(line + os.EOL);
-        return { ok: true };
-    } catch (e) {
-        return { ok: false, error: String(e) };
+    if (!child || child.killed || !child.stdin) {
+        return { ok: false, error: "Not running" };
     }
+
+    return new Promise((resolve) => {
+        const entry = {
+            command: line,
+            buffer: "",
+            hadStdErr: false,
+            completed: false,
+            timeout: null,
+            resolve,
+        };
+
+        pendingCommandQueue.push(entry);
+        resetPendingCommandTimeout(entry);
+
+        const finalizeWithError = (message) => {
+            finalizePendingCommand(entry, { error: message });
+        };
+
+        try {
+            child.stdin.write(`${line}${os.EOL}`, (writeError) => {
+                if (writeError) {
+                    finalizeWithError(writeError.message || String(writeError));
+                }
+            });
+        } catch (error) {
+            finalizeWithError(error?.message || String(error));
+        }
+    });
 });
 
 ipcMain.handle("stop-emu", async () => {
@@ -252,8 +444,10 @@ ipcMain.handle("stop-emu", async () => {
 
 ipcMain.handle("read-file", async (_evt, filePath) => {
     try {
+        // Use app.getAppPath() for packaged apps, __dirname for development
+        const appPath = app.isPackaged ? app.getAppPath() : __dirname;
         // Resolve relative paths from the app directory
-        const resolvedPath = path.isAbsolute(filePath) ? filePath : path.join(__dirname, filePath);
+        const resolvedPath = path.isAbsolute(filePath) ? filePath : path.join(appPath, filePath);
 
         // Check if path exists and is a file (not a directory)
         const stats = await stat(resolvedPath);
@@ -271,8 +465,10 @@ ipcMain.handle("read-file", async (_evt, filePath) => {
 
 ipcMain.handle("save-file", async (_evt, filePath, content) => {
     try {
+        // Use app.getAppPath() for packaged apps, __dirname for development
+        const appPath = app.isPackaged ? app.getAppPath() : __dirname;
         // Resolve relative paths from the app directory
-        const resolvedPath = path.isAbsolute(filePath) ? filePath : path.join(__dirname, filePath);
+        const resolvedPath = path.isAbsolute(filePath) ? filePath : path.join(appPath, filePath);
         await writeFile(resolvedPath, content, "utf8");
         return { ok: true };
     } catch (error) {
@@ -317,7 +513,6 @@ async function buildFileTree(dir, relBase = null) {
 
     for (const ent of entries) {
         const full = path.join(dir, ent.name);
-        const rel = path.relative(base, full);
 
         if (ent.isDirectory()) {
             if (ent.name === "node_modules" || ent.name.startsWith(".")) continue;

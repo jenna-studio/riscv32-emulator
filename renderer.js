@@ -20,6 +20,7 @@ let monacoLoaderPromise = null;
 let breakpointDecorations = [];
 let suppressEditorChange = false;
 let riscvLanguageRegistered = false;
+let compileButtonDefaultHTML = null;
 
 let ideState = {
     fileLoaded: false,
@@ -122,6 +123,9 @@ function enqueueEmulatorCommand(command) {
             if (!result || typeof result.ok === "undefined") {
                 return { ok: false, error: "Invalid emulator response" };
             }
+            if (result.timedOut) {
+                console.warn(`Command \"${command}\" timed out waiting for prompt`);
+            }
             return result;
         } catch (error) {
             console.error(`Command \"${command}\" failed:`, error);
@@ -203,18 +207,31 @@ function updateButtonStates() {
 
     // Quickbar
     document.querySelectorAll(".quickbar .control-group").forEach((group) => {
-        const label = group.querySelector(".group-label").textContent;
+        const labelNode = group.querySelector(".group-label");
+        const label = labelNode ? labelNode.textContent : "";
         const controls = group.querySelectorAll("button, input");
+
+        if (label === "Debug Control") {
+            controls.forEach((control) => {
+                const cmd = control.getAttribute("data-cmd");
+                if (cmd === "s") {
+                    control.disabled = !fileLoaded;
+                } else if (cmd === "q") {
+                    control.disabled = !emulatorRunning;
+                } else {
+                    control.disabled = !emulatorRunning;
+                }
+            });
+            return;
+        }
+
         let disable = false;
-        if (["Debug Control", "View", "Memory"].includes(label)) {
+        if (["View", "Memory"].includes(label)) {
             disable = !emulatorRunning;
         } else if (["Breakpoints", "Navigation"].includes(label)) {
             disable = !fileLoaded;
         }
-        // Display Options are always enabled.
-        if (label !== "Display Options") {
-            controls.forEach((c) => (c.disabled = disable));
-        }
+        controls.forEach((c) => (c.disabled = disable));
     });
 
     // Cmdbar
@@ -291,10 +308,10 @@ function initTerminal() {
                 if (!enhanced.includes("🔵")) enhanced = "🔵 " + enhanced;
                 break;
             case "segfault":
-                if (!enhanced.includes("💥")) enhanced = "💥 Memory Error: " + enhanced;
+                if (!enhanced.includes("🟠")) enhanced = "🟠 Memory Error: " + enhanced;
                 break;
             case "system-error":
-                if (!enhanced.includes("💥")) enhanced = "💥 System Error: " + enhanced;
+                if (!enhanced.includes("🟠")) enhanced = "🟠 System Error: " + enhanced;
                 break;
             case "success":
                 if (!enhanced.includes("✅")) enhanced = "✅ " + enhanced;
@@ -503,25 +520,7 @@ function initTerminal() {
                 e.preventDefault();
                 // Simple tab completion for common commands
                 const partial = input.value.toLowerCase();
-                const commonCommands = [
-                    "s",
-                    "step",
-                    "c",
-                    "continue",
-                    "r",
-                    "run",
-                    "info registers",
-                    "x/",
-                    "list",
-                    "b",
-                    "breakpoint",
-                    "del",
-                    "quit",
-                    "reset",
-                    "disasm",
-                    "memory",
-                    "trace",
-                ];
+                const commonCommands = ["s", "c", "r", "l", "m", "b", "q"];
                 const matches = commonCommands.filter((cmd) => cmd.startsWith(partial));
                 if (matches.length === 1) {
                     input.value = matches[0];
@@ -1340,6 +1339,44 @@ function formatNumberByDisplayOption(value) {
     }
 }
 
+function normalizeDebuggerCommand(command) {
+    const trimmed = command.trim();
+    if (!trimmed) return trimmed;
+
+    const [firstToken, ...restTokens] = trimmed.split(/\s+/);
+    const lowerFirst = firstToken.toLowerCase();
+    const restOriginal = restTokens.join(" ");
+    const restSuffix = restOriginal ? ` ${restOriginal}` : "";
+
+    if (lowerFirst === "info" && restTokens[0]?.toLowerCase() === "registers") {
+        return "r";
+    }
+
+    if (lowerFirst === "list") {
+        return "l";
+    }
+
+    if (lowerFirst === "step" || lowerFirst === "stepi") {
+        const count = restOriginal.trim();
+        return count ? `s${count}` : "s";
+    }
+
+    if (lowerFirst === "continue" || lowerFirst === "run") {
+        return "c";
+    }
+
+    if (/^s\d*$/i.test(trimmed)) {
+        return trimmed.toLowerCase();
+    }
+
+    const simpleMaps = new Set(["c", "r", "l", "q", "m", "b"]);
+    if (simpleMaps.has(lowerFirst)) {
+        return lowerFirst + restSuffix;
+    }
+
+    return trimmed;
+}
+
 async function sendCommand(command) {
     try {
         // Handle special commands that don't go to emulator
@@ -1349,20 +1386,16 @@ async function sendCommand(command) {
             return;
         }
 
-        // Handle step command with minimal output
-        if (command === "s" || command === "step") {
-            await performSingleStep();
-            return;
-        }
-
-        const result = await enqueueEmulatorCommand(command);
+        const commandToSend = normalizeDebuggerCommand(command);
+        const result = await enqueueEmulatorCommand(commandToSend);
         if (result.ok) {
             terminal.writeln(`>> ${command}`);
 
             // CPUlator-style command processing - sync all panels for execution commands
-            if (command === "c" || command === "r" || command.startsWith("stepi")) {
+            const isStepCommand = /^s\d*$/i.test(commandToSend);
+            if (commandToSend === "c" || commandToSend === "r" || isStepCommand) {
                 // Use the comprehensive sync function for all execution commands
-                await updateAfterExecution(command);
+                await updateAfterExecution(commandToSend);
 
                 // For step commands, also switch to registers panel to show changes
                 // Keep data synchronized but don't auto-switch panels
@@ -1370,10 +1403,10 @@ async function sendCommand(command) {
             }
 
             // Handle register display commands
-            if (command.startsWith("info registers") || command === "r") {
+            if (commandToSend === "r") {
                 // The output should be processed to update register display
                 setTimeout(async () => {
-                    const regResult = await enqueueEmulatorCommand("info registers");
+                    const regResult = await enqueueEmulatorCommand("r");
                     if (regResult.ok) {
                         ingestRegisterDump(regResult.output);
                         updateRegistersFromCurrentValues();
@@ -1529,11 +1562,11 @@ function updateBreakpointDisplay() {
 // CPUlator-style quick commands
 function addQuickCommands() {
     const quickCommands = [
-        { cmd: "info registers", desc: "Show all registers" },
-        { cmd: "info program", desc: "Show program status" },
-        { cmd: "disassemble $pc, $pc+40", desc: "Disassemble around PC" },
-        { cmd: "list", desc: "Show source code" },
-        { cmd: "backtrace", desc: "Show call stack" },
+        { cmd: "r", desc: "Show all registers" },
+        { cmd: "l", desc: "Show source code" },
+        { cmd: "m <addr> <count>", desc: "Examine memory" },
+        { cmd: "s", desc: "Step one instruction" },
+        { cmd: "c", desc: "Continue execution" },
     ];
 
     // Add to command history or suggestions
@@ -1631,6 +1664,11 @@ function setupButtonHandlers() {
     console.log("gotoBtn exists:", !!document.getElementById("gotoBtn"));
     console.log("memBtn exists:", !!document.getElementById("memBtn"));
 
+    const compileButton = document.getElementById("compileAndLoad");
+    if (compileButton && compileButtonDefaultHTML === null) {
+        compileButtonDefaultHTML = compileButton.innerHTML;
+    }
+
     document.getElementById("pick").addEventListener("click", async () => {
         const filePath = await window.api.pickAsm();
         if (filePath) {
@@ -1694,10 +1732,15 @@ function setupButtonHandlers() {
     });
 
     document.getElementById("compileAndLoad").addEventListener("click", async () => {
-        if (document.getElementById("compileAndLoad").disabled) return;
+        const compileBtn = document.getElementById("compileAndLoad");
+        if (compileBtn.disabled) return;
 
-        const btn = document.getElementById("compileAndLoad");
-        const originalText = btn.innerHTML;
+        const originalText = compileButtonDefaultHTML ?? compileBtn.innerHTML;
+        if (compileButtonDefaultHTML === null) {
+            compileButtonDefaultHTML = originalText;
+        }
+
+        const btn = compileBtn;
         btn.disabled = true;
         btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Compiling...';
 
@@ -2019,7 +2062,6 @@ function setupButtonHandlers() {
                 // Use the same logic as the main stop button
                 document.getElementById("stop").click();
             } else if (cmd === "s") {
-                // Step Into: execute one instruction with minimal output
                 await performSingleStep();
             } else if (cmd === "info registers") {
                 // VIEW panel: Registers button
@@ -2136,48 +2178,68 @@ async function syncAllPanels(reason = "update") {
 
         let pcHex = null;
 
-        console.log("📤 Sending 'info registers' command...");
-        const registersResult = await enqueueEmulatorCommand("info registers");
-        console.log("📥 info registers result:", registersResult.ok);
-        if (registersResult.ok) {
-            // Store current values as previous before ingesting new ones for highlighting
-            previousRegisterValues = { ...currentRegisterValues };
+        // For single-step operations, use minimal updates to avoid terminal clutter
+        if (reason === "single-step") {
+            // Update registers silently - suppressTerminalOutput is already active from performSingleStep
+            console.log("📤 Single-step: sending silent 'r' command...");
+            const registersResult = await enqueueEmulatorCommand("r");
 
-            const { pc } = ingestRegisterDump(registersResult.output);
-            if (pc) {
-                pcHex = pc;
+            if (registersResult.ok) {
+                const { pc } = ingestRegisterDump(registersResult.output);
+                if (pc) {
+                    pcHex = pc;
+                    console.log(`🎯 Updated PC: 0x${pc}`);
+                }
+                updateRegistersFromCurrentValues();
+                updatePerformanceCounters();
+                updateInstructionTypeStats();
             }
-            // Force a small delay to ensure register values are properly updated
-            await new Promise((resolve) => setTimeout(resolve, 10));
-            updateRegistersFromCurrentValues();
-            updatePerformanceCounters();
-            updateInstructionTypeStats();
-        }
 
-        console.log("📤 Sending 'list' command...");
-        const listResult = await enqueueEmulatorCommand("list");
-        console.log("📥 list result:", listResult.ok);
-        if (listResult.ok) {
-            const currentLine = parseCurrentLineFromList(listResult.output);
-            if (currentLine) {
-                console.log(`📍 Setting currentExecutionLine to: ${currentLine.lineNumber}`);
-                currentExecutionLine = currentLine.lineNumber;
-            } else {
-                console.log("❌ No current line found from list command");
-            }
-            updateSourceDisplay();
-            highlightCurrentSourceLine();
-            highlightCurrentLineInEditor();
+            // Skip list command for single-step to avoid clutter
+            console.log("🔄 Single-step: skipping list command to minimize output");
         } else {
-            console.log("❌ List command failed:", listResult.error);
+            // Normal operation for non-step commands
+            console.log("📤 Sending 'r' command for register dump...");
+            const registersResult = await enqueueEmulatorCommand("r");
+            console.log("📥 register dump result:", registersResult.ok);
+            if (registersResult.ok) {
+                previousRegisterValues = { ...currentRegisterValues };
+
+                const { pc } = ingestRegisterDump(registersResult.output);
+                if (pc) {
+                    pcHex = pc;
+                    console.log(`🎯 Updated PC: 0x${pc}`);
+                }
+
+                // Force a small delay to ensure register values are properly updated
+                await new Promise((resolve) => setTimeout(resolve, 10));
+                updateRegistersFromCurrentValues();
+                updatePerformanceCounters();
+                updateInstructionTypeStats();
+            }
+
+            // Send list command to get current execution line info and parse it immediately
+            console.log("📤 Sending 'l' command for source listing...");
+            const listResult = await enqueueEmulatorCommand("l");
+            if (listResult.ok && listResult.output) {
+                console.log("📄 List command output:", listResult.output.substring(0, 200) + "...");
+                // Parse immediately to update currentExecutionLine
+                parseEmulatorOutputForTrace(listResult.output);
+            }
         }
+
+        // Ensure UI updates are refreshed after getting current line
+        updateSourceDisplay();
+        highlightCurrentSourceLine();
+        highlightCurrentLineInEditor();
 
         if (!pcHex && currentRegisterValues["pc"]) {
             pcHex = currentRegisterValues["pc"];
         }
 
+        // Update disassembly around current PC
         if (pcHex) {
-            // Get broader disassembly context around current PC
+            console.log(`📤 Getting disassembly around PC: 0x${pcHex}`);
             const disasmResult = await enqueueEmulatorCommand(`disassemble 0x${pcHex},+20`);
             if (disasmResult.ok) {
                 updateDisassemblyDisplay(disasmResult.output);
@@ -2185,6 +2247,7 @@ async function syncAllPanels(reason = "update") {
             }
         }
 
+        // Update memory if an address is specified
         const memoryAddr = document.getElementById("memoryAddr")?.value;
         if (memoryAddr && memoryAddr.trim()) {
             const memoryLen = document.getElementById("memoryLen")?.value || "64";
@@ -2199,7 +2262,6 @@ async function syncAllPanels(reason = "update") {
             await refreshSymbolsPanel();
         } catch (error) {
             console.error("Error refreshing symbols panel:", error);
-            // Only show terminal error for critical issues
         }
 
         // Update call stack with fallback
@@ -2209,19 +2271,19 @@ async function syncAllPanels(reason = "update") {
             console.log("✅ Call stack panel updated");
         } catch (error) {
             console.error("Error refreshing call stack panel:", error);
-            // Only show terminal error for critical issues
         }
 
+        // Update breakpoint display
         try {
             updateBreakpointDisplay();
         } catch (error) {
             console.error("Error updating breakpoint display:", error);
         }
 
-        console.log(`✅ All panels synced (${reason})`);
+        console.log(`✅ All panels synced (${reason}) - Current line: ${currentExecutionLine}, PC: 0x${pcHex}`);
     } catch (error) {
         console.error("Error syncing panels:", error);
-        // Only show terminal error for critical sync failures
+        showNotification("Error syncing panels", "error");
     }
 }
 
@@ -2243,10 +2305,13 @@ async function performSingleStep() {
         stepExecutionInProgress = true;
         console.log("🔍 Starting single step execution...");
 
-        // Suppress automatic terminal output during step execution
+        // Store previous register values for highlighting changes
+        previousRegisterValues = { ...currentRegisterValues };
+
+        // Suppress ALL terminal output during step operation
         suppressTerminalOutput = true;
 
-        // Execute step command directly without sendCommand to avoid terminal clutter
+        // Execute step command
         console.log("📤 Sending single 's' command to emulator...");
         console.log(
             "📊 Before step - PC:",
@@ -2254,31 +2319,49 @@ async function performSingleStep() {
             "Line:",
             currentExecutionLine
         );
+
         const result = await enqueueEmulatorCommand("s");
         console.log("📥 Step command result:", result.ok ? "success" : "failed");
+
         if (result.output) {
             console.log("📄 Raw emulator output length:", result.output.length);
             console.log("📄 Raw emulator output:", result.output.substring(0, 200) + "...");
+
+            // Parse the step output immediately for current line tracking
+            parseEmulatorOutputForTrace(result.output);
         }
 
-        // Re-enable terminal output
-        suppressTerminalOutput = false;
-
         if (result.ok) {
-            // Show the command and its output
-            terminal.writeln(`>> s`);
-            if (result.output && result.output.trim()) {
-                terminal.writeln(result.output);
-            }
             const stepCount = (window.stepCounter = (window.stepCounter || 0) + 1);
 
+            // Parse step output to extract current state
+            const output = result.output || "";
+            const lines = output.split('\n');
+            let currentState = null;
+
+            // Look for the basic state info [inst: X, pc: Y, src: Z]
+            for (const line of lines) {
+                const stateMatch = line.match(/\[inst:\s*(\d+),\s*pc:\s*(\d+),\s*src:\s*(\d+)\]/);
+                if (stateMatch) {
+                    const [, inst, pc, src] = stateMatch;
+                    currentState = { inst, pc, src };
+                    break;
+                }
+            }
+
+            // Update current execution line from step output
+            if (currentState) {
+                const rawLineNumber = parseInt(currentState.src, 10);
+                const executableLine = Number.isNaN(rawLineNumber)
+                    ? null
+                    : findNearestExecutableLine(rawLineNumber);
+                currentExecutionLine = executableLine ?? currentExecutionLine;
+            }
+
             // Give emulator time to process
-            await new Promise((resolve) => setTimeout(resolve, 80));
+            await new Promise((resolve) => setTimeout(resolve, 100));
 
-            // Temporarily suppress output during panel updates too
-            suppressTerminalOutput = true;
-
-            // Update all panels to reflect new state with register highlighting
+            // Update all panels to reflect new state with register highlighting (still suppressed)
             console.log("🔄 Calling syncAllPanels directly for step...");
             await syncAllPanels("single-step");
             console.log(
@@ -2288,21 +2371,70 @@ async function performSingleStep() {
                 currentExecutionLine
             );
 
-            // Re-enable terminal output
+            // Force update all highlighting and displays
+            updateRegistersFromCurrentValues();
+            highlightCurrentLineInEditor();
+            highlightCurrentSourceLine();
+            updateSourceDisplay();
+
+            // Update previousRegisterValues for next comparison after a delay to allow highlighting
+            setTimeout(() => {
+                // Copy current values to previous for next step comparison
+                previousRegisterValues = { ...currentRegisterValues };
+            }, 100);
+
+            // Re-enable terminal output and show clean step output
             suppressTerminalOutput = false;
 
-            // Add to trace for debugging
+            // Show clean step output with next instruction info
+            if (currentState) {
+                // Look for "Next:" instruction in the output
+                let nextInstruction = null;
+                for (const line of lines) {
+                    const nextMatch = line.match(/^Next:\s*(.+)$/);
+                    if (nextMatch) {
+                        nextInstruction = nextMatch[1].trim();
+                        break;
+                    }
+                }
+
+                // Show the next instruction and execution context
+                if (nextInstruction) {
+                    terminal.writeln(`Next: ${nextInstruction}`);
+                }
+                terminal.writeln(`[inst: ${currentState.inst.padStart(7)}, pc: ${currentState.pc.padStart(7)}, src line: ${currentState.src.padStart(4)}]`);
+            } else {
+                terminal.writeln(`Step ${stepCount} executed`);
+            }
+
+            // Add to trace with source assembly instruction
             if (currentRegisterValues && Object.keys(currentRegisterValues).length > 0) {
                 const pc = currentRegisterValues["pc"];
-                const instruction = `[Step ${stepCount} @ 0x${pc || "unknown"}]`;
-                addToTrace(instruction, pc, currentRegisterValues);
+                const pcValue = parseInt(pc, 16);
+
+                // Get the source assembly instruction from the current execution line
+                let sourceInstruction = getSourceInstructionFromLine(currentExecutionLine);
+
+                // Fallback if we can't get the source instruction
+                if (!sourceInstruction) {
+                    sourceInstruction = `Step ${stepCount}`;
+                }
+
+                addToTrace(sourceInstruction, pcValue, { ...currentRegisterValues });
             }
+
         } else {
+            // Re-enable output for error messages
+            suppressTerminalOutput = false;
             terminal.writeln(`❌ Step failed: ${result.error || "Unknown error"}`);
+            showNotification("Step execution failed", "error");
         }
     } catch (error) {
         console.error("performSingleStep error:", error);
+        // Re-enable output for error messages
+        suppressTerminalOutput = false;
         terminal.writeln(`❌ Step error: ${error.message}`);
+        showNotification(`Step error: ${error.message}`, "error");
     } finally {
         // Always ensure terminal output is re-enabled
         suppressTerminalOutput = false;
@@ -2313,6 +2445,9 @@ async function performSingleStep() {
 // VIEW panel button handlers
 async function handleViewRegisters() {
     try {
+        // Switch to registers panel
+        switchToPanel("registers");
+
         // Sync all panels for comprehensive update (silent operation)
         await syncAllPanels("view registers");
 
@@ -2326,6 +2461,9 @@ async function handleViewRegisters() {
 
 async function handleViewSource() {
     try {
+        // Switch to source panel
+        switchToPanel("source");
+
         // Sync all panels for comprehensive update (silent operation)
         await syncAllPanels("view source");
 
@@ -2339,6 +2477,9 @@ async function handleViewSource() {
 
 async function handleViewDisassembly() {
     try {
+        // Switch to disassembly panel
+        switchToPanel("disassembly");
+
         // Get current PC for disassembly
         const pcValue = currentRegisterValues["pc"];
         const startAddr = pcValue ? `0x${pcValue}` : "0x400000";
@@ -2771,6 +2912,9 @@ function createPlaceholderDisassembly(baseAddr, count) {
 
 async function handleViewStatus() {
     try {
+        // Switch to statistics panel for program status
+        switchToPanel("statistics");
+
         // Sync all panels for comprehensive update (silent operation)
         await syncAllPanels("view status");
 
@@ -2802,20 +2946,7 @@ function highlightChangedRegisters(previousValues) {
     }
 }
 
-// Log step execution to trace panel
-function logStepToTrace() {
-    const pc = currentRegisterValues["pc"];
-    if (pc) {
-        const pcHex = "0x" + parseInt(pc, 16).toString(16).padStart(8, "0").toUpperCase();
-        const instruction = `Step executed at PC: ${pcHex}`;
-
-        // Add to instruction trace
-        addToTrace(instruction, parseInt(pc, 16), { ...currentRegisterValues });
-
-        // Update trace display
-        updateTraceDisplay();
-    }
-}
+// Removed unused logStepToTrace function - trace entries are now handled in performSingleStep
 
 // Highlight current instruction in disassembly panel
 function highlightCurrentInstructionInDisassembly(pcHex) {
@@ -3021,6 +3152,24 @@ function findNearestExecutableLine(lineNumber) {
 function parseCurrentLineFromList(listOutput) {
     if (!listOutput) return null;
     const lines = listOutput.split("\n");
+
+    console.log("🔍 parseCurrentLineFromList called with", lines.length, "lines");
+    console.log("🔍 First 3 lines:", lines.slice(0, 3));
+    console.log("🔍 Last 3 lines:", lines.slice(-3));
+
+    // Look for the new CURRENT_LINE: format first
+    for (const line of lines) {
+        if (line.includes("CURRENT_LINE")) {
+            console.log("🎯 Found CURRENT_LINE in line:", line);
+        }
+        const currentLineMatch = line.match(/^CURRENT_LINE:\s*(\d+)$/);
+        if (currentLineMatch) {
+            const lineNumber = parseInt(currentLineMatch[1], 10);
+            console.log("🎯 Matched CURRENT_LINE format! Line number:", lineNumber);
+            return { lineNumber, isCurrent: true, content: "" };
+        }
+    }
+
     const entries = [];
 
     for (const rawLine of lines) {
@@ -3582,15 +3731,28 @@ function parseEmulatorOutputForTrace(chunk) {
     for (const line of lines) {
         const trimmedLine = line.trim();
 
+        // Parse CURRENT_LINE format from list command: CURRENT_LINE: 4
+        const currentLineMatch = trimmedLine.match(/^CURRENT_LINE:\s*(\d+)$/);
+        if (currentLineMatch) {
+            const rawLineNumber = parseInt(currentLineMatch[1], 10);
+            const executableLine = Number.isNaN(rawLineNumber)
+                ? null
+                : findNearestExecutableLine(rawLineNumber);
+            currentExecutionLine = executableLine ?? currentExecutionLine;
+            console.log(
+                `🎯 CURRENT_LINE parsed: ${rawLineNumber} -> executable: ${executableLine}`
+            );
+            highlightCurrentLineInEditor();
+            updateSourceDisplay();
+        }
+
         // Parse instruction execution info: [inst: 1 pc: 0, src line 4]
         const instMatch = trimmedLine.match(/\[inst:\s*(\d+)\s+pc:\s*(\d+),\s*src line\s*(\d+)\]/);
         if (instMatch) {
             const [, instCount, pc, srcLine] = instMatch;
 
-            // Store the current execution context (but not during step suppression to preserve highlighting)
-            if (!suppressTerminalOutput) {
-                currentRegisterValues["pc"] = parseInt(pc).toString(16);
-            }
+            // Always track the current PC even when terminal output is suppressed
+            currentRegisterValues["pc"] = parseInt(pc, 10).toString(16);
             performanceCounters.instructions = parseInt(instCount);
 
             // Update current execution line and refresh source panel
@@ -3602,14 +3764,20 @@ function parseEmulatorOutputForTrace(chunk) {
             updateSourceDisplay();
         }
 
+
         // Parse "Next:" instruction line
         const nextMatch = trimmedLine.match(/^Next:\s*(.+)$/);
         if (nextMatch) {
             const instruction = nextMatch[1].trim();
             const pc = currentRegisterValues["pc"] ? parseInt(currentRegisterValues["pc"], 16) : 0;
 
-            // Add to trace and analyze instruction type
-            addToTrace(instruction, pc, { ...currentRegisterValues });
+            // Don't add duplicate trace entries during step operations
+            // The step function will handle adding the trace entry with the executed instruction
+            if (!suppressTerminalOutput) {
+                // Only add trace entry if not during a step operation
+                addToTrace(instruction, pc, { ...currentRegisterValues });
+            }
+
             analyzeInstructionType(instruction);
         }
 
@@ -3622,26 +3790,60 @@ function parseEmulatorOutputForTrace(chunk) {
             // Convert to hex string for consistency
             const hexValue = parseInt(newValue, newValue.startsWith("0x") ? 16 : 10).toString(16);
 
-            // Only update during normal execution, not during step suppression
-            if (!suppressTerminalOutput) {
-                currentRegisterValues[regName] = hexValue;
+            // Always update register values, even when terminal output is suppressed
+            currentRegisterValues[regName] = hexValue;
 
-                // Update registers display automatically
-                updateRegistersFromCurrentValues();
-            }
+            // Update registers display automatically
+            updateRegistersFromCurrentValues();
         }
     }
 }
 
 window.api.onOutput((chunk) => {
+    const textChunk = typeof chunk === "string" ? chunk : String(chunk ?? "");
+
     if (terminal && !suppressTerminalOutput) {
         // Format the output before displaying
-        const formattedChunk = formatTerminalOutput(chunk);
+        const formattedChunk = formatTerminalOutput(textChunk);
         terminal.write(formattedChunk);
     }
 
+    const exitMatch = textChunk.match(/\[process exited with code\s*(-?\d+)\]/i);
+    if (exitMatch) {
+        const parsedCode = Number.parseInt(exitMatch[1], 10);
+        const exitCode = Number.isNaN(parsedCode) ? null : parsedCode;
+        const wasRunning = ideState.emulatorRunning;
+
+        ideState.emulatorRunning = false;
+        currentExecutionLine = null;
+
+        if (monacoEditor && window.currentLineDecorations) {
+            monacoEditor.deltaDecorations(window.currentLineDecorations, []);
+            window.currentLineDecorations = [];
+        }
+
+        const compileBtn = document.getElementById("compileAndLoad");
+        if (compileBtn) {
+            if (compileButtonDefaultHTML !== null) {
+                compileBtn.innerHTML = compileButtonDefaultHTML;
+            }
+            compileBtn.disabled = !ideState.fileLoaded;
+        }
+
+        updateButtonStates();
+
+        if (wasRunning && (exitCode === null || exitCode !== 0)) {
+            const message =
+                exitCode === null
+                    ? "Emulator process exited"
+                    : `Emulator exited with code ${exitCode}`;
+            const type = exitCode === null ? "info" : "error";
+            showNotification(message, type);
+        }
+    }
+
     // Parse emulator output for trace information
-    parseEmulatorOutputForTrace(chunk);
+    parseEmulatorOutputForTrace(textChunk);
 });
 
 // Format terminal output for better readability
@@ -3875,26 +4077,7 @@ const riscvInstructions = {
         encoding: "imm[11:0] rs1 010 rd 0000011",
         example: "lw x1, 4(x2)  # x1 = mem[x2 + 4]",
     },
-    lbu: {
-        name: "Load Byte Unsigned",
-        format: "lbu rd, offset(rs1)",
-        category: "RV32I",
-        description:
-            "Loads a 8-bit value from memory and zero-extends to 32-bits before storing in rd.",
-        implementation: "x[rd] = M[x[rs1] + sext(offset)][7:0]",
-        encoding: "imm[11:0] rs1 100 rd 0000011",
-        example: "lbu x1, 4(x2)  # x1 = zero_extend(mem[x2 + 4])",
-    },
-    lhu: {
-        name: "Load Halfword Unsigned",
-        format: "lhu rd, offset(rs1)",
-        category: "RV32I",
-        description:
-            "Loads a 16-bit value from memory and zero-extends to 32-bits before storing in rd.",
-        implementation: "x[rd] = M[x[rs1] + sext(offset)][15:0]",
-        encoding: "imm[11:0] rs1 101 rd 0000011",
-        example: "lhu x1, 4(x2)  # x1 = zero_extend(mem[x2 + 4])",
-    },
+    // Removed duplicate lbu and lhu entries - kept the ones in the load/store section
     sb: {
         name: "Store Byte",
         format: "sb rs2, offset(rs1)",
@@ -3958,24 +4141,7 @@ const riscvInstructions = {
         encoding: "imm[12|10:5] rs2 rs1 101 imm[4:1|11] 1100011",
         example: "bge x1, x2, loop  # if x1 >= x2, goto loop",
     },
-    bltu: {
-        name: "Branch Less Than Unsigned",
-        format: "bltu rs1, rs2, offset",
-        category: "RV32I",
-        description: "Takes the branch if rs1 < rs2 (unsigned comparison).",
-        implementation: "if (x[rs1] <u x[rs2]) pc += sext(offset)",
-        encoding: "imm[12|10:5] rs2 rs1 110 imm[4:1|11] 1100011",
-        example: "bltu x1, x2, loop  # if x1 <u x2, goto loop",
-    },
-    bgeu: {
-        name: "Branch Greater Equal Unsigned",
-        format: "bgeu rs1, rs2, offset",
-        category: "RV32I",
-        description: "Takes the branch if rs1 >= rs2 (unsigned comparison).",
-        implementation: "if (x[rs1] >=u x[rs2]) pc += sext(offset)",
-        encoding: "imm[12|10:5] rs2 rs1 111 imm[4:1|11] 1100011",
-        example: "bgeu x1, x2, loop  # if x1 >=u x2, goto loop",
-    },
+    // Removed duplicate bgeu entry - kept the one in the branch instructions section
     jal: {
         name: "Jump And Link",
         format: "jal rd, offset",
@@ -4389,50 +4555,7 @@ const riscvInstructions = {
     },
 };
 
-// CPUlator-style register display with change highlighting
-function updateRegisterDisplay(registerData) {
-    const registersGrid = document.getElementById("registersGrid");
-    if (!registersGrid || !registerData) return;
-
-    // Parse register data and highlight changes
-    const registerLines = registerData.split("\n");
-    let html = '<div class="register-table">';
-
-    registerLines.forEach((line) => {
-        if (line.includes("x")) {
-            const matches = line.match(/x(\d+):\s*([0-9a-fA-F]+)/g);
-            if (matches) {
-                matches.forEach((match) => {
-                    const [reg, value] = match.split(": ");
-                    const regNum = parseInt(reg.substring(1));
-                    const newValue = value.trim();
-
-                    const changed = previousRegisterValues[reg] !== newValue;
-                    if (changed && previousRegisterValues[reg] !== undefined) {
-                        currentRegisterValues[reg] = newValue;
-                    }
-
-                    html += `<div class="register-item ${changed ? "changed" : ""}">
-                        <span class="reg-name">${reg}</span>
-                        <span class="reg-value">${newValue}</span>
-                        <span class="reg-alias">${getRegisterAlias(regNum)}</span>
-                    </div>`;
-
-                    previousRegisterValues[reg] = newValue;
-                });
-            }
-        }
-    });
-
-    html += "</div>";
-    registersGrid.innerHTML = html;
-
-    // Remove highlighting after animation
-    setTimeout(() => {
-        const changed = registersGrid.querySelectorAll(".changed");
-        changed.forEach((el) => el.classList.remove("changed"));
-    }, 1500);
-}
+// Removed unused updateRegisterDisplay function - using updateRegistersFromCurrentValues instead
 
 // Update registers display from current values
 function updateRegistersFromCurrentValues() {
@@ -4478,7 +4601,8 @@ function updateRegistersFromCurrentValues() {
             <span class="reg-alias">${alias}</span>
         </div>`;
 
-        previousRegisterValues[regName] = currentValue;
+        // Don't update previousRegisterValues here - it breaks highlighting!
+        // previousRegisterValues should only be updated when starting a new step
     }
 
     html += "</div>";
@@ -4488,7 +4612,7 @@ function updateRegistersFromCurrentValues() {
     setTimeout(() => {
         const changed = registersGrid.querySelectorAll(".changed");
         changed.forEach((el) => el.classList.remove("changed"));
-    }, 1500);
+    }, 4000);
 }
 
 // Get RISC-V register aliases
@@ -4567,6 +4691,42 @@ function getRegisterRoleClass(regNum) {
         31: "reg-role-temp", // x31/t6 - temporary
     };
     return roleClasses[regNum] || "reg-role-general";
+}
+
+// Get source assembly instruction from line number
+function getSourceInstructionFromLine(lineNumber) {
+    if (!monacoEditor || !lineNumber) {
+        return null;
+    }
+
+    try {
+        const model = monacoEditor.getModel();
+        if (!model) return null;
+
+        const lineContent = model.getLineContent(lineNumber);
+        if (!lineContent) return null;
+
+        // Remove comments and extra whitespace
+        let instruction = lineContent.split('#')[0].trim();
+
+        // Skip empty lines and labels (lines ending with :)
+        if (!instruction || instruction.endsWith(':')) {
+            return null;
+        }
+
+        // Remove labels from the same line (e.g., "start: li sp 0x10000" -> "li sp 0x10000")
+        if (instruction.includes(':')) {
+            const parts = instruction.split(':');
+            if (parts.length > 1) {
+                instruction = parts[1].trim();
+            }
+        }
+
+        return instruction || null;
+    } catch (error) {
+        console.error('Error getting source instruction:', error);
+        return null;
+    }
 }
 
 // CPUlator-style instruction trace

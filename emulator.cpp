@@ -73,6 +73,39 @@ typedef struct instr_struct {
     instr_struct() : op(UNIMPL), orig_line(-1), psrc(NULL), breakpoint(false) {}
 } instr;
 
+static inline uint32_t load_store_size(instr_type op) {
+    switch (op) {
+        case LB:
+        case LBU:
+        case SB:
+            return 1;
+        case LH:
+        case LHU:
+        case SH:
+            return 2;
+        case LW:
+        case SW:
+            return 4;
+        default:
+            return 4;
+    }
+}
+
+static inline uint32_t apply_load_extension(instr_type op, uint32_t value) {
+    switch (op) {
+        case LB:
+            return signextend(value & 0xffu, 8);
+        case LBU:
+            return value & 0xffu;
+        case LH:
+            return signextend(value & 0xffffu, 16);
+        case LHU:
+            return value & 0xffffu;
+        default:
+            return value;
+    }
+}
+
 void print_regfile(uint32_t* rf) {
     for ( int i = 0; i < 32; i+=4 ) {
         printf( "x%02d: %08x x%02d: %08x x%02d: %08x x%02d: %08x\n",
@@ -237,9 +270,15 @@ void append_source(char* ftok, char* o1, char* o2, char* o3, source* src, instr*
     }
 
     if ( src->offset < MAX_SRC_LEN ) {
+        // Add newline before this instruction if src buffer is not empty
+        if ( src->offset > 0 ) {
+            src->src[src->offset] = '\n';
+            src->offset += 1;
+        }
         strncpy(src->src+src->offset, tbuf, strlen(tbuf));
+        src->src[src->offset + strlen(tbuf)] = '\0';  // Add null terminator
         i->psrc = src->src+src->offset;
-        src->offset += slen+1;
+        src->offset += strlen(tbuf) + 1;  // Use actual string length for offset
     }
 }
 
@@ -653,18 +692,13 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
         inst_cnt ++;
 
         if ( stepping || i.breakpoint ) {
-            if ( stepcnt > 0 ) {
-                stepcnt -= 1;
-            }
-
+            // Only enter debug loop if we're not in the middle of executing steps
             if ( stepcnt == 0 || i.breakpoint ) {
                 stepping = true;
                 printf( "\n" );
-                if ( i.psrc )
-                    printf( "Next: %s\n", i.psrc );
 
                 while (true) {
-                    printf( "[inst: %6d pc: %6d, src line %4d]\n", inst_cnt, pc, i.orig_line );
+                    printf( "[inst: %4d, pc: %4d, src: %4d]\n", inst_cnt, pc, i.orig_line );
                     printf(">> ");
                     fflush(stdout);
                     // Use standard fgets instead of linenoise
@@ -688,23 +722,36 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                         break;
                     }
                     if ( keybuf[0] == 's' ) {
-                        stepcnt = parse_imm(keybuf+1, 16, 0, false);
+                        if ( strlen(keybuf+1) == 0 ) {
+                            stepcnt = 1;  // Default to 1 step if no number provided
+                        } else {
+                            stepcnt = parse_imm(keybuf+1, 16, 0, false);
+                        }
+                        stepping = false;  // Exit stepping mode to execute the steps
                         break;
                     }
                     if ( keybuf[0] == 'b' ) {
                         // todo breakpoint!
-                        uint32_t break_line = parse_imm(keybuf+1, 16, 0, false);
                         if ( strlen(keybuf+1) == 0 ) {
                             for ( int i = 0; i < DATA_OFFSET/4; i++ ) {
                                 if ( imem[i].breakpoint )
                                     printf( "Break at line %d: %s\n", imem[i].orig_line, imem[i].psrc );
                             }
                         } else {
-                            for ( int i = 0; i < DATA_OFFSET/4; i++ ) {
-                                if ( imem[i].orig_line >= break_line ) {
-                                    printf( "Break point added to line %d\n", break_line );
-                                    imem[i].breakpoint = true;
-                                    break;
+                            uint32_t break_line = parse_imm(keybuf+1, 16, 0, false);
+                            if ( break_line == 0 && keybuf[1] != '0' ) {
+                                printf( "Invalid line number: %s\n", keybuf+1 );
+                            } else {
+                                bool breakpoint_set = false;
+                                for ( int i = 0; i < DATA_OFFSET/4; i++ ) {
+                                    if ( imem[i].orig_line == break_line ) {
+                                        printf( "Break point added to line %d\n", break_line );
+                                        imem[i].breakpoint = true;
+                                        breakpoint_set = true;
+                                    }
+                                }
+                                if ( !breakpoint_set ) {
+                                    printf( "No executable instruction found at line %d\n", break_line );
                                 }
                             }
                         }
@@ -712,12 +759,17 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                     if ( keybuf[0] == 'B' ) {
                         // breakpoint remove
                         uint32_t break_line = parse_imm(keybuf+1, 16, 0, false);
+                        bool breakpoint_removed = false;
                         for ( int i = 0; i < DATA_OFFSET/4; i++ ) {
                             if ( imem[i].orig_line == break_line && imem[i].breakpoint ) {
-                                printf( "Break point removed from line %d\n", break_line );
                                 imem[i].breakpoint = false;
-                                break;
+                                breakpoint_removed = true;
                             }
+                        }
+                        if ( breakpoint_removed ) {
+                            printf( "Break point removed from line %d\n", break_line );
+                        } else {
+                            printf( "No breakpoint found at line %d\n", break_line );
                         }
                     }
                     if ( keybuf[0] == 'r' ) {
@@ -746,11 +798,17 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                     if ( keybuf[0] == 'l' ) {
                         printf( "Listing compiled isntructions\n" );
                         printf( " srcline : Compiled instruction\n" );
+                        uint32_t current_iid = pc/4;
                         for ( int i = 0; i < DATA_OFFSET/4; i++ ) {
                             instr* ii = &imem[i];
                             if ( ii->orig_line >= 0 && ii->psrc ) {
-                                printf( "%9d: %s\n", ii->orig_line, ii->psrc );
+                                char marker = (i == current_iid) ? '>' : ' ';
+                                printf( "%c%8d: %s\n", marker, ii->orig_line, ii->psrc );
                             }
+                        }
+                        // Also print current execution info for frontend parsing
+                        if ( current_iid < DATA_OFFSET/4 && imem[current_iid].orig_line >= 0 ) {
+                            printf( "CURRENT_LINE: %d\n", imem[current_iid].orig_line );
                         }
                     }
                 }
@@ -780,12 +838,19 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
             case SRLI: rf[i.a1.reg] = rf[i.a2.reg] >> i.a3.imm; break;
             case SRAI: rf[i.a1.reg] = (*(int32_t*)&rf[i.a2.reg]) >> i.a3.imm; break;
 
-            case LB: case LBU: case LH: case LHU: case LW:
-                rf[i.a1.reg] = mem_read(mem, rf[i.a2.reg]+i.a3.imm, i.op);
+            case LB: case LBU: case LH: case LHU: case LW: {
+                uint32_t addr = rf[i.a2.reg] + i.a3.imm;
+                uint32_t size = load_store_size(i.op);
+                uint32_t raw = mem_read(mem, addr, size);
+                rf[i.a1.reg] = apply_load_extension(i.op, raw);
                 break;
-            case SB: case SH: case SW:
-                mem_write(mem, rf[i.a2.reg]+i.a3.imm, rf[i.a1.reg], i.op);
+            }
+            case SB: case SH: case SW: {
+                uint32_t addr = rf[i.a2.reg] + i.a3.imm;
+                uint32_t size = load_store_size(i.op);
+                mem_write(mem, addr, rf[i.a1.reg], size);
                 break;
+            }
             /* case SB: mem[rf[i.a2.reg]+i.a3.imm] = *(uint8_t*)&(rf[i.a1.reg]); break;
             case SH: *(uint16_t*)&(mem[rf[i.a2.reg]+i.a3.imm]) = *(uint16_t*)&(rf[i.a1.reg]); break;
             case SW: *(uint32_t*)&(mem[rf[i.a2.reg]+i.a3.imm]) = rf[i.a1.reg];
@@ -808,7 +873,7 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
             case HCF:
                 printf( "\n\n----------\n\n" );
                 printf( "Reached Halt and Catch Fire instruction!\n" );
-                printf( "inst: %6d pc: %6d src line: %d\n", inst_cnt, pc, i.orig_line );
+                printf( "inst: %4d, pc: %4d, src: %4d\n", inst_cnt, pc, i.orig_line );
                 print_regfile(rf);
                 printf( "Cache read %d/%d Cache write %d/%d\n", cache_read_hits, mem_read_reqs, cache_write_hits, mem_write_reqs );
                 printf( "Cache flush words: %d\n", mem_flush_words);
@@ -820,13 +885,18 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                 printf( "Reached an unimplemented instruction!\n" );
                 if ( i.psrc )
                     printf( "Instruction: %s\n", i.psrc );
-                printf( "inst: %6d pc: %6d src line: %d\n", inst_cnt, pc, i.orig_line );
+                printf( "inst: %4d, pc: %4d, src: %4d\n", inst_cnt, pc, i.orig_line );
                 print_regfile(rf);
                 dexit = true;
                 break;
         }
         pc = pc_next % MEM_BYTES;
         rf[0] = 0;// cleaner way to do this?
+
+        // Show the current instruction that was just executed
+        if ( stepping && i.psrc ) {
+            printf( "Executed: %s\n", i.psrc );
+        }
 
         if ( stepping ) {
             for ( int i = 0; i < 32; i++ ) {
@@ -835,6 +905,15 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                 rf_mirror[i] = rf[i];
             }
         }
+
+        // Decrement step count after instruction execution
+        if (!stepping && stepcnt > 0) {
+            stepcnt -= 1;
+            if (stepcnt == 0) {
+                stepping = true;
+            }
+        }
+
         //printf( "reg dst %d -> %x %d\n", i.a1.reg, rf[i.a1.reg], rf[i.a1.reg] );
         fflush(stdout);
     }

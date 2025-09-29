@@ -41,12 +41,14 @@
             <div class="spacer"></div>
             <div class="left-controls">
                 <div class="file-controls">
+                    <label for="numberFormat" id="displayFormat">Display</label>
                     <select id="numberFormat" title="Number display format">
                         <option value="hex">Hex</option>
                         <option value="dec">Dec</option>
                         <option value="bin">Bin</option>
                         <option value="oct">Oct</option>
                     </select>
+                    <label for="numberFormat" id="displayFormat">Go to</label>
                     <input id="gotoAddress" placeholder="Address/Label" title="Go to address" size="10">
                     <button id="gotoBtn" title="Navigate to address">
                         <i class="fas fa-crosshairs"></i>
@@ -75,8 +77,8 @@
                     Compile and Load
                 </button>
                 <button id="reload">
-                    <i class="fas fa-sync-alt"></i>
-                    Reload
+                    <i class="fas fa-play"></i>
+                    Run
                 </button>
                 <button id="stop">
                     <i class="fas fa-stop"></i>
@@ -146,18 +148,6 @@
                 </div>
             </div>
 
-            <div class="control-group">
-                <span class="group-label">Display Options</span>
-                <div>
-                    <select id="memoryWordsPerRow" title="Memory words per row">
-                        <option value="1">1 word/row</option>
-                        <option value="2">2 words/row</option>
-                        <option value="4" selected>4 words/row</option>
-                        <option value="8">8 words/row</option>
-                        <option value="16">16 words/row</option>
-                    </select>
-                </div>
-            </div>
         </div>
 
         <div class="main-layout">
