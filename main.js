@@ -136,7 +136,9 @@ async function extractEmulatorIfNeeded() {
     }
 
     // In packaged app, use the unpacked binary directly
-    const unpackedEmulator = path.join(app.getAppPath(), "..", "app.asar.unpacked", "obj", "emulator");
+    // app.getAppPath() returns path to app.asar, so get parent directory for app.asar.unpacked
+    const resourcesPath = path.dirname(app.getAppPath());
+    const unpackedEmulator = path.join(resourcesPath, "app.asar.unpacked", "obj", "emulator");
 
     if (existsSync(unpackedEmulator)) {
         console.log(`Using unpacked emulator: ${unpackedEmulator}`);
@@ -308,17 +310,36 @@ ipcMain.handle("run-emu", async (_evt, asmPath) => {
             return { ok: false, error };
         }
 
-        // Use app.getAppPath() for packaged apps, __dirname for development
+        // For file resolution:
+        // - In development: use __dirname
+        // - In packaged app: use app.getAppPath() which points to app.asar
+        //   (files inside asar are accessible via Electron's fs, but not by spawned processes)
         const appPath = app.isPackaged ? app.getAppPath() : __dirname;
 
         // Resolve assembly file path relative to app path if not absolute
-        const absolutePath = path.isAbsolute(asmPath) ? asmPath : path.resolve(appPath, asmPath);
+        let absolutePath = path.isAbsolute(asmPath) ? asmPath : path.resolve(appPath, asmPath);
 
         // Check if the assembly file exists
         if (!existsSync(absolutePath)) {
             const error = `Assembly file not found: ${absolutePath}`;
             console.error("Assembly file not found:", error);
             return { ok: false, error };
+        }
+
+        // In packaged apps, the emulator (spawned process) can't read files inside asar
+        // Extract to temp directory first
+        if (app.isPackaged && absolutePath.includes('.asar')) {
+            const tempDir = path.join(os.tmpdir(), "riscv-emulator-files");
+            if (!existsSync(tempDir)) {
+                mkdirSync(tempDir, { recursive: true });
+            }
+
+            const tempFilePath = path.join(tempDir, path.basename(absolutePath));
+            const fileContent = await readFile(absolutePath, 'utf8');
+            await writeFile(tempFilePath, fileContent, 'utf8');
+
+            console.log(`Extracted ${absolutePath} to ${tempFilePath}`);
+            absolutePath = tempFilePath;
         }
 
         console.log(`Starting emulator with file: ${asmPath}`);
@@ -328,7 +349,9 @@ ipcMain.handle("run-emu", async (_evt, asmPath) => {
         console.log(`File exists check (absolute): ${existsSync(absolutePath)}`);
         console.log(`Is packaged: ${app.isPackaged}`);
 
-        child = spawn(exe, [absolutePath], { cwd: appPath });
+        // For cwd, we need an actual directory, not app.asar
+        const cwdPath = app.isPackaged ? path.dirname(appPath) : appPath;
+        child = spawn(exe, [absolutePath], { cwd: cwdPath });
         child.stdout.setEncoding("utf8");
         child.stderr.setEncoding("utf8");
 

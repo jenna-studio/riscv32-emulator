@@ -18,3 +18,7 @@ electron-trace-test.log
 # IDE files
 .vscode/
 .idea/
+
+# backups files
+renderer.js.bak*
+emulator.cpp.bak*

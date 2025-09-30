@@ -412,6 +412,85 @@ int parse_pseudoinstructions(int line, char* ftok, instr* imem, int ioff, label_
         //append_source(ftok, o1, o2, o3, src, i2); // done in normalize
         return 2;
     }
+    // lw rd, label - pseudo-instruction that expands to: la rd, label; lw rd, 0(rd)
+    if ( streq(ftok, "lw") && o1 && o2 && !o3 && !strchr(o2, '(') ) {
+        int reg = parse_reg(o1, line);
+        if (reg < 0) return 0; // Not a valid register, let normal parsing handle it
+
+        // First, load address: la rd, label
+        instr* i = &imem[ioff];
+        i->op = LUI;
+        i->a1.type = OPTYPE_REG;
+        i->a1.reg = reg;
+        i->a2.type = OPTYPE_LABEL;
+        strncpy(i->a2.label, o2, MAX_LABEL_LEN);
+        i->orig_line = line;
+
+        instr* i2 = &imem[ioff+1];
+        i2->op = ADDI;
+        i2->a1.type = OPTYPE_REG;
+        i2->a1.reg = reg;
+        i2->a2.type = OPTYPE_REG;
+        i2->a2.reg = reg;
+        i2->a3.type = OPTYPE_LABEL;
+        strncpy(i2->a3.label, o2, MAX_LABEL_LEN);
+        i2->orig_line = line;
+
+        // Then, load word: lw rd, 0(rd)
+        instr* i3 = &imem[ioff+2];
+        i3->op = LW;
+        i3->a1.type = OPTYPE_REG;
+        i3->a1.reg = reg;
+        i3->a2.type = OPTYPE_REG;
+        i3->a2.reg = reg;
+        i3->a3.type = OPTYPE_IMM;
+        i3->a3.imm = 0;
+        i3->orig_line = line;
+        append_source("lw", o1, "0(rd)", NULL, src, i3);
+
+        return 3;
+    }
+    // sw rd, label - pseudo-instruction that expands to: la at, label; sw rd, 0(at)
+    if ( streq(ftok, "sw") && o1 && o2 && !o3 && !strchr(o2, '(') ) {
+        int reg = parse_reg(o1, line);
+        if (reg < 0) return 0; // Not a valid register, let normal parsing handle it
+
+        // Use x5 (t0) as temporary register
+        int temp_reg = 5;
+
+        // First, load address: la t0, label
+        instr* i = &imem[ioff];
+        i->op = LUI;
+        i->a1.type = OPTYPE_REG;
+        i->a1.reg = temp_reg;
+        i->a2.type = OPTYPE_LABEL;
+        strncpy(i->a2.label, o2, MAX_LABEL_LEN);
+        i->orig_line = line;
+
+        instr* i2 = &imem[ioff+1];
+        i2->op = ADDI;
+        i2->a1.type = OPTYPE_REG;
+        i2->a1.reg = temp_reg;
+        i2->a2.type = OPTYPE_REG;
+        i2->a2.reg = temp_reg;
+        i2->a3.type = OPTYPE_LABEL;
+        strncpy(i2->a3.label, o2, MAX_LABEL_LEN);
+        i2->orig_line = line;
+
+        // Then, store word: sw rd, 0(t0)
+        instr* i3 = &imem[ioff+2];
+        i3->op = SW;
+        i3->a1.type = OPTYPE_REG;
+        i3->a1.reg = reg;
+        i3->a2.type = OPTYPE_REG;
+        i3->a2.reg = temp_reg;
+        i3->a3.type = OPTYPE_IMM;
+        i3->a3.imm = 0;
+        i3->orig_line = line;
+        append_source("sw", o1, "0(t0)", NULL, src, i3);
+
+        return 3;
+    }
     if ( streq(ftok, "nop" )) {
         if ( o1 ) print_syntax_error(line, "Invalid format");
         instr* i = &imem[ioff];
@@ -622,6 +701,14 @@ void parse(FILE* fin, uint8_t* mem, instr* imem, int& memoff, label_loc* labels,
         if ( !fgets(rbuf, 1024, fin) )
             break;
 
+        // Strip inline comments (everything after # or ;)
+        for (char* p = rbuf; *p; ++p) {
+            if (*p == '#' || *p == ';') {
+                *p = '\0';
+                break;
+            }
+        }
+
         for (char* p = rbuf; *p; ++p) *p = tolower(*p);
 
         line++;
@@ -629,6 +716,7 @@ void parse(FILE* fin, uint8_t* mem, instr* imem, int& memoff, label_loc* labels,
         if ( !ftok )
             continue;
 
+        // Skip lines that are now empty after comment removal
         if ( ftok[0] == '#' )
             continue;
 
@@ -793,6 +881,38 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                                 printf( "%02x ", mem[addr+(w*4)+i] );
                             }
                             printf( "\n" );
+                        }
+                    }
+                    if ( keybuf[0] == 'd' || strncmp(keybuf, "disassemble", 11) == 0 ) {
+                        char* addr_str = keybuf + 1;
+                        if (strncmp(keybuf, "disassemble", 11) == 0) addr_str = keybuf + 11;
+                        while (*addr_str == ' ' || *addr_str == '\t') addr_str++;
+                        
+                        uint32_t addr = parse_imm(addr_str, 31, 0, false);
+                        int cnt = 20;
+                        char* ftok2 = strtok(keybuf, " \t\r\n,+");
+                        ftok2 = strtok(NULL, " \t\r\n,+");
+                        ftok2 = strtok(NULL, " \t\r\n,+");
+                        if ( ftok2 ) {
+                            cnt = parse_imm(ftok2, 16, 0, false);
+                            if (cnt <= 0) cnt = 20;
+                        }
+                        
+                        uint32_t start_addr = addr & ~0x3;
+                        for ( int w = 0; w < cnt; w++ ) {
+                            uint32_t current_addr = start_addr + (w * 4);
+                            uint32_t current_index = current_addr / 4;
+                            if (current_addr < sizeof(mem)) {
+                                uint32_t opcode = 0;
+                                for (int i = 0; i < 4; i++) {
+                                    opcode |= (mem[current_addr + i] & 0xFF) << (i * 8);
+                                }
+                                const char* instr_str = "???";
+                                if (current_index < DATA_OFFSET/4 && imem[current_index].psrc) {
+                                    instr_str = imem[current_index].psrc;
+                                }
+                                printf( "%08x: %08x    %s\n", current_addr, opcode, instr_str );
+                            }
                         }
                     }
                     if ( keybuf[0] == 'l' ) {

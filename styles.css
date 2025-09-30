@@ -495,7 +495,7 @@ body {
 
 .trace-header {
     display: grid;
-    grid-template-columns: 80px 100px 1fr;
+    grid-template-columns: 80px 120px 1fr;
     gap: 12px;
     padding: 8px 12px;
     background: var(--bg-tertiary);
@@ -509,7 +509,7 @@ body {
 
 .trace-entry {
     display: grid;
-    grid-template-columns: 80px 100px 1fr;
+    grid-template-columns: 80px 120px 1fr;
     gap: 12px;
     padding: 4px 12px;
     border-bottom: 1px solid var(--border-light);
@@ -2809,37 +2809,126 @@ select:focus {
 
 /* Memory display enhancements */
 .memory-display {
-    font-family: "Fira Code", monospace;
+    font-family: "Fira Code", "SF Mono", "Monaco", "Consolas", monospace;
+    font-size: 13px;
+    background: #fafafa;
+    border-radius: 6px;
+    overflow-x: auto;
+}
+
+.memory-table {
+    display: table;
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.memory-header {
+    display: table-row;
+    background: linear-gradient(180deg, #e8e4ff 0%, #f0edff 100%);
+    font-weight: 700;
+    color: #5a4aa0;
     font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 2px solid #c5b8ff;
+}
+
+.memory-header > span {
+    display: table-cell;
+    padding: 8px 10px;
+    vertical-align: middle;
+}
+
+.mem-addr-header {
+    width: 120px;
+    text-align: left;
+}
+
+.mem-hex-header {
+    font-family: "Fira Code", monospace;
+    letter-spacing: 0.3px;
+    text-align: left;
+}
+
+.mem-ascii-header {
+    width: 180px;
+    text-align: center;
 }
 
 .memory-row {
-    display: flex;
-    padding: 2px 8px;
-    border-bottom: 1px solid var(--border-light);
+    display: table-row;
+    transition: background 0.1s ease;
 }
 
 .memory-row:hover {
-    background: var(--accent-lavender);
+    background: #fff8e1 !important;
+}
+
+.memory-row:nth-child(even) {
+    background: #f9f9f9;
+}
+
+.memory-row > span {
+    display: table-cell;
+    padding: 6px 10px;
+    vertical-align: middle;
+    border-bottom: 1px solid #e8e8e8;
 }
 
 .memory-address {
-    width: 100px;
-    color: var(--accent-purple);
-    font-weight: 600;
-    margin-right: 16px;
+    font-weight: 700;
+    color: #6b5ce7;
+    font-family: "Fira Code", monospace;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    text-align: left;
 }
 
 .memory-hex {
-    flex: 1;
-    margin-right: 16px;
-    font-family: monospace;
+    font-family: "Fira Code", "SF Mono", monospace;
+    letter-spacing: 0.8px;
+    color: #333;
+    white-space: nowrap;
+}
+
+.mem-byte {
+    display: inline-block;
+    padding: 2px 4px;
+    margin: 0 1px;
+    border-radius: 3px;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    transition: all 0.15s ease;
+}
+
+.mem-byte:hover {
+    background: #e3f2fd;
+    border-color: #64b5f6;
+    transform: scale(1.05);
+    box-shadow: 0 2px 4px rgba(100, 181, 246, 0.3);
+    cursor: pointer;
+}
+
+.mem-byte.mem-empty {
+    color: #bbb;
+    background: #fafafa;
+    border-color: #f0f0f0;
+}
+
+.mem-spacer {
+    display: inline-block;
+    width: 8px;
 }
 
 .memory-ascii {
-    width: 100px;
-    color: var(--text-secondary);
-    font-family: monospace;
+    font-family: "Courier New", monospace;
+    letter-spacing: 2px;
+    color: #666;
+    text-align: center;
+    background: #f5f5f5;
+    border-left: 2px solid #e0e0e0;
+    font-size: 12px;
 }
 
 /* CPUlator-style Compilation Workflow Styling */
@@ -2994,7 +3083,7 @@ select:focus {
 
 .callstack-header {
     display: grid;
-    grid-template-columns: 2fr 1.2fr 1.2fr 1fr;
+    grid-template-columns: 80px 100px 2fr 150px;
     gap: 12px;
     padding: 8px 12px;
     background: var(--bg-tertiary);
@@ -3003,6 +3092,7 @@ select:focus {
     color: var(--text-secondary);
     position: sticky;
     top: 0;
+    font-size: 11px;
 }
 
 .callstack-content {
@@ -3062,6 +3152,45 @@ select:focus {
 
 .frame-source {
     color: var(--text-secondary);
+}
+
+/* Call Stack Log Entry Styles */
+.callstack-entry {
+    display: grid;
+    grid-template-columns: 80px 100px 2fr 150px;
+    gap: 12px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border-light);
+    font-size: 11px;
+    align-items: center;
+}
+
+.callstack-entry:hover {
+    background: var(--bg-secondary);
+}
+
+.callstack-entry.current {
+    background: rgba(255, 215, 0, 0.1);
+    font-weight: 600;
+}
+
+.callstack-entry.callstack-call {
+    border-left: 3px solid #4ade80;
+}
+
+.callstack-entry.callstack-return {
+    border-left: 3px solid #f87171;
+}
+
+.callstack-cycle {
+    color: var(--text-secondary);
+    font-family: "Fira Code", monospace;
+    text-align: right;
+}
+
+.callstack-event {
+    color: var(--text-primary);
+    font-weight: 500;
 }
 
 /* Enhanced controls styling */

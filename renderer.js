@@ -846,7 +846,7 @@ function registerRiscvLanguage(monacoInstance) {
 
     const riscvLanguageConfig = {
         comments: {
-            lineComment: "//",
+            lineComment: "#",
             blockComment: ["/*", "*/"],
         },
         brackets: [
@@ -1801,13 +1801,6 @@ function setupButtonHandlers() {
             const runRes = await window.api.runEmu(asmPath);
 
             if (runRes.ok) {
-                terminal.writeln("✅ Assembly loaded and emulator started!");
-                terminal.writeln(
-                    "🟢 Ready for debugging - use Step Into, Continue, or send commands"
-                );
-                terminal.writeln(
-                    "💡 The emulator is now waiting for your input in step-by-step mode"
-                );
                 showNotification("Emulator running - ready for debugging!", "success");
                 await syncBreakpoints();
                 ideState.emulatorRunning = true;
@@ -1998,11 +1991,17 @@ function setupButtonHandlers() {
     });
 
     // Memory refresh button
-    document.getElementById("memoryRefresh").addEventListener("click", () => {
+    document.getElementById("memoryRefresh").addEventListener("click", async () => {
         const addr = document.getElementById("memoryAddr").value.trim();
         const len = document.getElementById("memoryLen").value.trim() || "64";
         if (addr) {
-            sendCommand(`x/${len}x ${addr}`);
+            const result = await enqueueEmulatorCommand(`m ${addr} ${len}`);
+            if (result.ok) {
+                updateMemoryDisplay(result.output);
+                showNotification("Memory panel updated", "success");
+            } else {
+                showNotification("Failed to read memory", "error");
+            }
         }
     });
 
@@ -2138,7 +2137,7 @@ function setupButtonHandlers() {
             return;
         }
 
-        const command = `x/${length}${format} ${addr}`;
+        const command = `m ${addr} ${length}`;
         const result = await enqueueEmulatorCommand(command);
 
         if (result.ok) {
@@ -2247,13 +2246,31 @@ async function syncAllPanels(reason = "update") {
             }
         }
 
-        // Update memory if an address is specified
-        const memoryAddr = document.getElementById("memoryAddr")?.value;
+        // Update memory panel
+        const memoryAddrInput = document.getElementById("memoryAddr");
+        let memoryAddr = memoryAddrInput?.value;
+
+        // Auto-populate with stack pointer if no address specified
+        if (!memoryAddr || !memoryAddr.trim()) {
+            const sp = currentRegisterValues["x02"] || currentRegisterValues["x2"] || currentRegisterValues["sp"];
+            if (sp) {
+                const spValue = parseInt(sp, 16);
+                // Show memory around stack pointer (64 bytes before SP to see stack contents)
+                memoryAddr = `0x${(spValue - 64).toString(16)}`;
+                if (memoryAddrInput) {
+                    memoryAddrInput.value = memoryAddr;
+                }
+            }
+        }
+
+        // Update memory display if we have an address
         if (memoryAddr && memoryAddr.trim()) {
             const memoryLen = document.getElementById("memoryLen")?.value || "64";
-            const memResult = await enqueueEmulatorCommand(`x/${memoryLen}xb ${memoryAddr}`);
+            console.log(`📤 Fetching memory at ${memoryAddr}, length ${memoryLen}`);
+            const memResult = await enqueueEmulatorCommand(`m ${memoryAddr} ${memoryLen}`);
             if (memResult.ok) {
                 updateMemoryDisplay(memResult.output);
+                console.log("✅ Memory panel updated");
             }
         }
 
@@ -2280,7 +2297,9 @@ async function syncAllPanels(reason = "update") {
             console.error("Error updating breakpoint display:", error);
         }
 
-        console.log(`✅ All panels synced (${reason}) - Current line: ${currentExecutionLine}, PC: 0x${pcHex}`);
+        console.log(
+            `✅ All panels synced (${reason}) - Current line: ${currentExecutionLine}, PC: 0x${pcHex}`
+        );
     } catch (error) {
         console.error("Error syncing panels:", error);
         showNotification("Error syncing panels", "error");
@@ -2336,7 +2355,7 @@ async function performSingleStep() {
 
             // Parse step output to extract current state
             const output = result.output || "";
-            const lines = output.split('\n');
+            const lines = output.split("\n");
             let currentState = null;
 
             // Look for the basic state info [inst: X, pc: Y, src: Z]
@@ -2401,8 +2420,18 @@ async function performSingleStep() {
                 // Show the next instruction and execution context
                 if (nextInstruction) {
                     terminal.writeln(`Next: ${nextInstruction}`);
+
+                    // Show instruction reference information
+                    const instrInfo = getInstructionInfo(nextInstruction);
+                    if (instrInfo) {
+                        terminal.writeln(`  ${instrInfo.name} - ${instrInfo.description}`);
+                    }
                 }
-                terminal.writeln(`[inst: ${currentState.inst.padStart(7)}, pc: ${currentState.pc.padStart(7)}, src line: ${currentState.src.padStart(4)}]`);
+                terminal.writeln(
+                    `[inst: ${currentState.inst.padStart(7)}, pc: ${currentState.pc.padStart(
+                        7
+                    )}, src line: ${currentState.src.padStart(4)}]`
+                );
             } else {
                 terminal.writeln(`Step ${stepCount} executed`);
             }
@@ -2422,7 +2451,6 @@ async function performSingleStep() {
 
                 addToTrace(sourceInstruction, pcValue, { ...currentRegisterValues });
             }
-
         } else {
             // Re-enable output for error messages
             suppressTerminalOutput = false;
@@ -2518,11 +2546,13 @@ async function refreshDisassemblyPanel(startAddr, count = 20) {
         const disasmResult = await enqueueEmulatorCommand(
             `disassemble ${address},+${normalizedCount}`
         );
-
         if (disasmResult.ok && disasmResult.output) {
             updateDisassemblyDisplay(disasmResult.output);
         } else {
-            createPlaceholderDisassembly(baseAddr, normalizedCount);
+            const disasmContent = document.getElementById("disasmContent");
+            if (disasmContent) {
+                disasmContent.innerHTML = '<div class="disasm-empty">No disassembly data available at this address.</div>';
+            }
         }
     } catch (error) {
         console.error(`Error refreshing disassembly panel (${bytesToRead} bytes):`, error);
@@ -2601,7 +2631,10 @@ function updateMemoryDisplay(memoryOutput) {
     }
 
     const lines = memoryOutput.split(/\r?\n/);
-    let html = "";
+
+    // Parse all memory data into a flat array
+    let memoryData = [];
+    let baseAddress = 0;
 
     lines.forEach((line) => {
         const match = line.match(/^\s*([^:]+):\s*(.+)$/);
@@ -2609,34 +2642,86 @@ function updateMemoryDisplay(memoryOutput) {
 
         const address = match[1].trim();
         const rawValues = match[2].trim().split(/\s+/).filter(Boolean);
-        if (rawValues.length === 0) return;
 
-        let ascii = "";
-        rawValues.forEach((token) => {
+        // Parse address
+        const addr = parseInt(address.replace('0x', ''), 16);
+        if (memoryData.length === 0) {
+            baseAddress = addr;
+        }
+
+        // Parse bytes
+        rawValues.forEach((token, index) => {
             const hexCandidate = token.startsWith("0x") ? token.slice(2) : token;
             let value = Number.parseInt(hexCandidate, 16);
-            if (Number.isNaN(value)) {
-                value = Number.parseInt(token, 10);
-            }
-
             if (!Number.isNaN(value)) {
-                const clamped = value & 0xff;
-                ascii += clamped >= 32 && clamped <= 126 ? String.fromCharCode(clamped) : ".";
+                memoryData.push({
+                    address: addr + index,
+                    value: value & 0xff
+                });
             }
         });
-
-        html += `<div class="memory-row">
-            <span class="memory-address">${address}:</span>
-            <span class="memory-hex">${rawValues.join(" ")}</span>
-            <span class="memory-ascii">${ascii || "&nbsp;"}</span>
-        </div>`;
     });
 
-    if (html) {
-        memoryDisplay.innerHTML = html;
-    } else {
+    if (memoryData.length === 0) {
         memoryDisplay.innerHTML = '<div class="empty-message">No memory data available</div>';
+        return;
     }
+
+    // Build CPUlator-style display: 16 bytes per row with word grouping
+    let html = '<div class="memory-table">';
+
+    // Header row
+    html += '<div class="memory-header">';
+    html += '<span class="mem-addr-header">Address</span>';
+    html += '<span class="mem-hex-header">+0 +1 +2 +3  +4 +5 +6 +7  +8 +9 +A +B  +C +D +E +F</span>';
+    html += '<span class="mem-ascii-header">ASCII</span>';
+    html += '</div>';
+
+    // Align to 16-byte boundaries
+    const startAddr = Math.floor(baseAddress / 16) * 16;
+    const endAddr = memoryData[memoryData.length - 1].address;
+
+    for (let addr = startAddr; addr <= endAddr; addr += 16) {
+        html += '<div class="memory-row">';
+
+        // Address column
+        html += `<span class="memory-address">0x${addr.toString(16).padStart(8, '0').toUpperCase()}</span>`;
+
+        // Hex bytes column - grouped by 4 bytes (words)
+        html += '<span class="memory-hex">';
+        let ascii = '';
+
+        for (let i = 0; i < 16; i++) {
+            const byteAddr = addr + i;
+            const memByte = memoryData.find(m => m.address === byteAddr);
+
+            if (memByte) {
+                const hexStr = memByte.value.toString(16).padStart(2, '0').toUpperCase();
+                html += `<span class="mem-byte">${hexStr}</span>`;
+
+                // ASCII representation
+                const ch = memByte.value;
+                ascii += (ch >= 32 && ch <= 126) ? String.fromCharCode(ch) : '·';
+            } else {
+                html += '<span class="mem-byte mem-empty">··</span>';
+                ascii += '·';
+            }
+
+            // Add spacing every 4 bytes (word boundary)
+            if ((i + 1) % 4 === 0 && i < 15) {
+                html += '<span class="mem-spacer"> </span>';
+            }
+        }
+        html += '</span>';
+
+        // ASCII column
+        html += `<span class="memory-ascii">${ascii}</span>`;
+
+        html += '</div>';
+    }
+
+    html += '</div>';
+    memoryDisplay.innerHTML = html;
 }
 
 function disassembleInstruction(instruction) {
@@ -3469,6 +3554,7 @@ async function resetEmulatorState() {
     currentRegisterValues = {};
     instructionTrace = [];
     callStack = [];
+    callStackLog = [];
     conditionalBreakpoints.clear();
 
     // Reset IDE state flags
@@ -3608,28 +3694,6 @@ function updateDisassemblyDisplay(disasmOutput) {
                 <span class="disasm-instr">${escapeHtml(instruction)}</span>
                 <span class="disasm-comment"></span>
             </div>`;
-        } else if (trimmedLine.includes(":") && !trimmedLine.startsWith("Dump")) {
-            // Alternative format parsing
-            const parts = trimmedLine.split(":");
-            if (parts.length >= 2) {
-                const address = parts[0].trim();
-                const rest = parts[1].trim();
-                const normalizedAddr = address.replace(/^0x/i, "").toLowerCase();
-                const displayAddr = address.startsWith("0x")
-                    ? address.toLowerCase()
-                    : `0x${normalizedAddr}`;
-                const isCurrentPC =
-                    (currentRegisterValues["pc"] || "").toLowerCase() === normalizedAddr;
-
-                html += `<div class="disasm-line ${
-                    isCurrentPC ? "current-pc" : ""
-                }" data-address="${normalizedAddr}">
-                    <span class="disasm-addr">${displayAddr}</span>
-                    <span class="disasm-opcode">--</span>
-                    <span class="disasm-instr">${escapeHtml(rest)}</span>
-                    <span class="disasm-comment"></span>
-                </div>`;
-            }
         }
     });
 
@@ -3762,8 +3826,10 @@ function parseEmulatorOutputForTrace(chunk) {
                 : findNearestExecutableLine(rawLineNumber);
             currentExecutionLine = executableLine ?? currentExecutionLine;
             updateSourceDisplay();
-        }
 
+            // Update statistics display (PC, SP, instruction count, etc.)
+            updateStatisticsPanel();
+        }
 
         // Parse "Next:" instruction line
         const nextMatch = trimmedLine.match(/^Next:\s*(.+)$/);
@@ -3779,6 +3845,7 @@ function parseEmulatorOutputForTrace(chunk) {
             }
 
             analyzeInstructionType(instruction);
+            updateInstructionTypeStats();
         }
 
         // Parse register changes: >> rf[x02] 0 -> 10000
@@ -3795,6 +3862,7 @@ function parseEmulatorOutputForTrace(chunk) {
 
             // Update registers display automatically
             updateRegistersFromCurrentValues();
+            updateStatisticsPanel();
         }
     }
 }
@@ -4186,6 +4254,87 @@ const riscvInstructions = {
         implementation: "// No operation",
         encoding: "000000000000 00000 000 00000 0010011",
         example: "nop  # do nothing",
+    beqz: {
+        name: "Branch if Equal to Zero",
+        format: "beqz rs1, offset",
+        category: "Pseudo",
+        description: "Takes the branch if register rs1 equals zero. Pseudo-instruction for beq rs1, x0, offset.",
+        implementation: "if (x[rs1] == 0) pc += sext(offset)",
+        encoding: "beq rs1, x0, offset",
+        example: "beqz x1, loop  # if x1 == 0, goto loop",
+    },
+    bnez: {
+        name: "Branch if Not Equal to Zero",
+        format: "bnez rs1, offset",
+        category: "Pseudo",
+        description: "Takes the branch if register rs1 is not equal to zero. Pseudo-instruction for bne rs1, x0, offset.",
+        implementation: "if (x[rs1] != 0) pc += sext(offset)",
+        encoding: "bne rs1, x0, offset",
+        example: "bnez x1, loop  # if x1 != 0, goto loop",
+    },
+    ret: {
+        name: "Return from subroutine",
+        format: "ret",
+        category: "Pseudo",
+        description: "Returns from a subroutine. Pseudo-instruction for jalr x0, x1, 0 (jump to address in ra).",
+        implementation: "pc = x[ra]",
+        encoding: "jalr x0, x1, 0",
+        example: "ret  # return from function",
+    },
+    j: {
+        name: "Jump",
+        format: "j offset",
+        category: "Pseudo",
+        description: "Unconditional jump. Pseudo-instruction for jal x0, offset.",
+        implementation: "pc += sext(offset)",
+        encoding: "jal x0, offset",
+        example: "j loop  # jump to loop",
+    },
+    jr: {
+        name: "Jump Register",
+        format: "jr rs1",
+        category: "Pseudo",
+        description: "Jump to address in register. Pseudo-instruction for jalr x0, rs1, 0.",
+        implementation: "pc = x[rs1]",
+        encoding: "jalr x0, rs1, 0",
+        example: "jr x1  # jump to address in x1",
+    },
+    call: {
+        name: "Call subroutine",
+        format: "call offset",
+        category: "Pseudo",
+        description: "Call a subroutine. Pseudo-instruction that expands to auipc+jalr.",
+        implementation: "x[ra] = pc+4; pc += sext(offset)",
+        encoding: "auipc/jalr sequence",
+        example: "call function  # call function",
+    },
+    li: {
+        name: "Load Immediate",
+        format: "li rd, imm",
+        category: "Pseudo",
+        description: "Load immediate value into register. Expands to lui+addi or just addi for small values.",
+        implementation: "x[rd] = immediate",
+        encoding: "lui/addi sequence",
+        example: "li x1, 0x12345  # x1 = 0x12345",
+    },
+    la: {
+        name: "Load Address",
+        format: "la rd, symbol",
+        category: "Pseudo",
+        description: "Load address of symbol. Expands to auipc+addi.",
+        implementation: "x[rd] = address_of(symbol)",
+        encoding: "auipc/addi sequence",
+        example: "la x1, data  # x1 = address of data",
+    },
+    mv: {
+        name: "Move",
+        format: "mv rd, rs",
+        category: "Pseudo",
+        description: "Copy register. Pseudo-instruction for addi rd, rs, 0.",
+        implementation: "x[rd] = x[rs]",
+        encoding: "addi rd, rs, 0",
+        example: "mv x1, x2  # x1 = x2",
+    },
     },
 
     // Additional Load/Store Instructions
@@ -4707,16 +4856,16 @@ function getSourceInstructionFromLine(lineNumber) {
         if (!lineContent) return null;
 
         // Remove comments and extra whitespace
-        let instruction = lineContent.split('#')[0].trim();
+        let instruction = lineContent.split("#")[0].trim();
 
         // Skip empty lines and labels (lines ending with :)
-        if (!instruction || instruction.endsWith(':')) {
+        if (!instruction || instruction.endsWith(":")) {
             return null;
         }
 
         // Remove labels from the same line (e.g., "start: li sp 0x10000" -> "li sp 0x10000")
-        if (instruction.includes(':')) {
-            const parts = instruction.split(':');
+        if (instruction.includes(":")) {
+            const parts = instruction.split(":");
             if (parts.length > 1) {
                 instruction = parts[1].trim();
             }
@@ -4724,9 +4873,31 @@ function getSourceInstructionFromLine(lineNumber) {
 
         return instruction || null;
     } catch (error) {
-        console.error('Error getting source instruction:', error);
+        console.error("Error getting source instruction:", error);
         return null;
     }
+}
+
+// Get brief instruction info for terminal display
+function getInstructionInfo(instructionText) {
+    if (!instructionText) return null;
+
+    // Extract the opcode (first word)
+    const parts = instructionText
+        .trim()
+        .toLowerCase()
+        .split(/[\s,]+/);
+    const opcode = parts[0];
+
+    // Look up in instruction database
+    const instrInfo = riscvInstructions[opcode];
+    if (!instrInfo) return null;
+
+    return {
+        name: instrInfo.name,
+        format: instrInfo.format,
+        description: instrInfo.description,
+    };
 }
 
 // CPUlator-style instruction trace
@@ -4741,10 +4912,69 @@ function addToTrace(instruction, pc, registers) {
 
     instructionTrace.push(traceEntry);
 
+    // Detect and log call/return instructions for call stack
+    detectCallReturnInstruction(instruction, pc, registers);
+
     // Keep all entries - no limit (make scrollable instead)
 
     updateTraceDisplay();
     updatePerformanceCounters();
+}
+
+// Detect JAL/JALR (calls) and RET (returns) for call stack logging
+function detectCallReturnInstruction(instruction, pc, registers) {
+    if (!instruction) return;
+
+    const instr = instruction.trim().toLowerCase();
+    const parts = instr.split(/[\s,]+/);
+    const op = parts[0];
+
+    // Detect function calls: JAL or JALR (excluding returns)
+    if (op === "jal" && parts.length >= 2) {
+        const rd = parts[1];
+        const target = parts[2] || "";
+        // jal ra, func or jal x1, func is a call
+        if (rd === "ra" || rd === "x1" || rd === "x01") {
+            logCallStackEvent(
+                "call",
+                target || "unknown",
+                `0x${pc.toString(16).padStart(8, "0")}`,
+                ""
+            );
+        }
+    } else if (op === "jalr" && parts.length >= 2) {
+        const rd = parts[1];
+        // jalr ra, ... is a call (not a return)
+        if ((rd === "ra" || rd === "x1" || rd === "x01") && parts.length >= 3) {
+            logCallStackEvent("call", "indirect", `0x${pc.toString(16).padStart(8, "0")}`, "");
+        }
+        // jalr x0, x1, 0 or jalr zero, ra, 0 is a return
+        else if (
+            (rd === "zero" || rd === "x0" || rd === "x00") &&
+            (parts[2] === "ra" || parts[2] === "x1" || parts[2] === "x01")
+        ) {
+            const ra = registers["x01"] || registers["x1"] || registers["ra"] || "0";
+            logCallStackEvent(
+                "return",
+                "ret",
+                `0x${parseInt(ra, 16).toString(16).padStart(8, "0")}`,
+                ""
+            );
+        }
+    } else if (op === "ret" || op === "jr") {
+        // ret pseudo-instruction (expands to jalr x0, x1, 0)
+        const ra = registers["x01"] || registers["x1"] || registers["ra"] || "0";
+        logCallStackEvent(
+            "return",
+            "ret",
+            `0x${parseInt(ra, 16).toString(16).padStart(8, "0")}`,
+            ""
+        );
+    } else if (op === "call") {
+        // call pseudo-instruction
+        const target = parts[1] || "unknown";
+        logCallStackEvent("call", target, `0x${pc.toString(16).padStart(8, "0")}`, "");
+    }
 }
 
 function updateTraceDisplay() {
@@ -4783,7 +5013,11 @@ function updateTraceDisplay() {
 
 function updatePerformanceCounters() {
     performanceCounters.instructions++;
+    updateStatisticsPanel();
+}
 
+// Update statistics panel display without incrementing counters
+function updateStatisticsPanel() {
     // Update all statistics panel elements with better formatting
     const statInstructions = document.getElementById("statInstructions");
     if (statInstructions) {
@@ -4806,7 +5040,11 @@ function updatePerformanceCounters() {
 
     const statSP = document.getElementById("statSP");
     if (statSP) {
-        const spValue = currentRegisterValues["x2"] || currentRegisterValues["sp"] || "0";
+        const spValue =
+            currentRegisterValues["x02"] ||
+            currentRegisterValues["x2"] ||
+            currentRegisterValues["sp"] ||
+            "0";
         statSP.textContent = `0x${parseInt(spValue, 16)
             .toString(16)
             .padStart(8, "0")
@@ -4981,6 +5219,7 @@ function initCPUlatorFeatures() {
     document.addEventListener("click", (e) => {
         if (e.target && e.target.id === "clearTrace") {
             instructionTrace = [];
+            callStackLog = [];
             performanceCounters.cycles = 0;
             performanceCounters.instructions = 0;
 
@@ -4991,8 +5230,9 @@ function initCPUlatorFeatures() {
             instructionStats.syscalls = 0;
 
             updateTraceDisplay();
+            updateCallStackLogDisplay();
             updatePerformanceCounters();
-            showNotification("Instruction trace and statistics cleared", "info");
+            showNotification("Instruction trace, call stack, and statistics cleared", "info");
         }
 
         if (e.target && e.target.id === "searchInstruction") {
@@ -5021,6 +5261,9 @@ function initCPUlatorFeatures() {
 
     // Initialize registers display
     updateRegistersFromCurrentValues();
+    
+    // Initialize call stack display
+    updateCallStackLogDisplay();
 
     console.log("✅ Features initialized");
 }
@@ -5446,33 +5689,35 @@ function displayInstructionInfo(instructionName) {
     detailsContainer.innerHTML = `
         <div class="instruction-info">
             <div class="instruction-header">
-                <h2>${instruction.name}</h2>
-                <span class="instruction-category">${instruction.category}</span>
+                <h2>${escapeHtml(instruction.name)}</h2>
+                <span class="instruction-category">${escapeHtml(instruction.category)}</span>
             </div>
 
             <div class="instruction-section">
                 <h3>Format</h3>
-                <code class="instruction-format">${instruction.format}</code>
+                <code class="instruction-format">${escapeHtml(instruction.format)}</code>
             </div>
 
             <div class="instruction-section">
                 <h3>Description</h3>
-                <div class="instruction-description">${instruction.description}</div>
+                <div class="instruction-description">${escapeHtml(instruction.description)}</div>
             </div>
 
             <div class="instruction-section">
                 <h3>Implementation</h3>
-                <code class="instruction-implementation">${instruction.implementation}</code>
+                <code class="instruction-implementation">${escapeHtml(
+                    instruction.implementation
+                )}</code>
             </div>
 
             <div class="instruction-section">
                 <h3>Encoding</h3>
-                <code class="instruction-encoding">${instruction.encoding}</code>
+                <code class="instruction-encoding">${escapeHtml(instruction.encoding)}</code>
             </div>
 
             <div class="instruction-section">
                 <h3>Example</h3>
-                <code class="instruction-example">${instruction.example}</code>
+                <code class="instruction-example">${escapeHtml(instruction.example)}</code>
             </div>
 
             <div class="instruction-footer">
@@ -5512,6 +5757,7 @@ function addConditionalBreakpoint(lineNumber, condition = null) {
 
 // Call Stack panel functionality
 let callStack = [];
+let callStackLog = []; // Logs all call/return events for history
 
 // Global symbols storage for cross-panel access
 let globalAssemblySymbols = [];
@@ -5551,58 +5797,68 @@ function updateCallStackDisplay(stackOutput) {
     updateCallStackDisplayFromEntries(stackEntries);
 }
 
-// Updated function to display call stack from stack entries array
-function updateCallStackDisplayFromEntries(stackEntries) {
+// Add call/return event to log
+function logCallStackEvent(type, functionName, address, returnAddr) {
+    const event = {
+        type: type, // 'call' or 'return'
+        function: functionName,
+        address: address,
+        returnAddr: returnAddr,
+        timestamp: Date.now(),
+        cycle: performanceCounters.cycles,
+    };
+
+    callStackLog.push(event);
+    updateCallStackLogDisplay();
+}
+
+// Updated function to display call stack log (similar to trace panel)
+function updateCallStackLogDisplay() {
     const callstackContent = document.getElementById("callstackContent");
     const callDepth = document.getElementById("callDepth");
 
     if (!callstackContent) return;
 
-    callStack = stackEntries;
-
-    // Update call depth
+    // Update call depth to show current stack depth
+    const currentDepth =
+        callStackLog.filter((e) => e.type === "call").length -
+        callStackLog.filter((e) => e.type === "return").length;
     if (callDepth) {
-        callDepth.textContent = callStack.length;
+        callDepth.textContent = Math.max(0, currentDepth);
     }
 
-    // Generate HTML
-    let html = "";
-    if (callStack.length === 0) {
-        html =
-            '<div class="callstack-empty"><i class="fas fa-info-circle"></i> No active function calls</div>';
+    // Generate HTML showing all logged events (like trace panel)
+    let html =
+        '<div class="callstack-header"><span>Cycle</span><span>Event</span><span>Function</span><span>Address</span></div>';
+
+    if (callStackLog.length === 0) {
+        html +=
+            '<div class="callstack-empty">No call/return events yet. Start the emulator and use step/run commands to see the call stack log.</div>';
     } else {
-        callStack.forEach((frame, index) => {
-            const isCurrentFrame = index === 0;
-            html += `<div class="callstack-frame ${
-                isCurrentFrame ? "current-frame" : ""
-            }" data-address="${frame.address}" data-function="${escapeHtml(frame.function)}">
-                <span class="callstack-func" title="${escapeHtml(frame.function)}">${escapeHtml(
-                frame.function
-            )}</span>
-                <span class="callstack-addr" title="Address: ${frame.address}">${
-                frame.address
-            }</span>
-                <span class="callstack-ret" title="Return Address">${frame.returnAddr}</span>
-                <span class="callstack-line" title="Source Line">${frame.srcLine}</span>
+        // Show all events in chronological order
+        callStackLog.forEach((event, index) => {
+            const eventIcon = event.type === "call" ? "→" : "←";
+            const eventClass = event.type === "call" ? "callstack-call" : "callstack-return";
+            html += `<div class="callstack-entry ${eventClass} ${
+                index === callStackLog.length - 1 ? "current" : ""
+            }">
+                <span class="callstack-cycle">${event.cycle}</span>
+                <span class="callstack-event">${eventIcon} ${event.type}</span>
+                <span class="callstack-func">${escapeHtml(event.function)}</span>
+                <span class="callstack-addr">${event.address}</span>
             </div>`;
         });
     }
 
     callstackContent.innerHTML = html;
+    callstackContent.scrollTop = callstackContent.scrollHeight;
+}
 
-    // Add click handlers for stack frames
-    callstackContent.querySelectorAll(".callstack-frame[data-address]").forEach((frameElement) => {
-        frameElement.addEventListener("click", () => {
-            const address = frameElement.getAttribute("data-address");
-            const functionName = frameElement.getAttribute("data-function");
-
-            // Navigate to the function address in disassembly
-            if (address) {
-                refreshDisassemblyPanel(address, 20);
-                showNotification(`Navigated to ${functionName} at ${address}`, "info");
-            }
-        });
-    });
+// Updated function to display call stack from stack entries array (keep for compatibility)
+function updateCallStackDisplayFromEntries(stackEntries) {
+    callStack = stackEntries;
+    // Now just track current state but don't replace the log view
+    // The log view is the primary display
 }
 
 document.addEventListener("DOMContentLoaded", initializeIDE);
