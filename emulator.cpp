@@ -701,9 +701,13 @@ void parse(FILE* fin, uint8_t* mem, instr* imem, int& memoff, label_loc* labels,
         if ( !fgets(rbuf, 1024, fin) )
             break;
 
-        // Strip inline comments (everything after # or ;)
+        // Strip inline comments (everything after #, ;, or //)
         for (char* p = rbuf; *p; ++p) {
             if (*p == '#' || *p == ';') {
+                *p = '\0';
+                break;
+            }
+            if (*p == '/' && *(p + 1) == '/') {
                 *p = '\0';
                 break;
             }
@@ -1018,7 +1022,8 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
             printf( "Executed: %s\n", i.psrc );
         }
 
-        if ( stepping ) {
+        // Print register changes when stepping or executing step count
+        if ( stepping || stepcnt > 0 ) {
             for ( int i = 0; i < 32; i++ ) {
                 if ( rf[i] != rf_mirror[i] )
                     printf( ">> rf[x%02d] %x -> %x\n", i, rf_mirror[i], rf[i] );

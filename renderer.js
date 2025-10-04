@@ -2252,7 +2252,10 @@ async function syncAllPanels(reason = "update") {
 
         // Auto-populate with stack pointer if no address specified
         if (!memoryAddr || !memoryAddr.trim()) {
-            const sp = currentRegisterValues["x02"] || currentRegisterValues["x2"] || currentRegisterValues["sp"];
+            const sp =
+                currentRegisterValues["x02"] ||
+                currentRegisterValues["x2"] ||
+                currentRegisterValues["sp"];
             if (sp) {
                 const spValue = parseInt(sp, 16);
                 // Show memory around stack pointer (64 bytes before SP to see stack contents)
@@ -2551,7 +2554,8 @@ async function refreshDisassemblyPanel(startAddr, count = 20) {
         } else {
             const disasmContent = document.getElementById("disasmContent");
             if (disasmContent) {
-                disasmContent.innerHTML = '<div class="disasm-empty">No disassembly data available at this address.</div>';
+                disasmContent.innerHTML =
+                    '<div class="disasm-empty">No disassembly data available at this address.</div>';
             }
         }
     } catch (error) {
@@ -2644,7 +2648,7 @@ function updateMemoryDisplay(memoryOutput) {
         const rawValues = match[2].trim().split(/\s+/).filter(Boolean);
 
         // Parse address
-        const addr = parseInt(address.replace('0x', ''), 16);
+        const addr = parseInt(address.replace("0x", ""), 16);
         if (memoryData.length === 0) {
             baseAddress = addr;
         }
@@ -2656,7 +2660,7 @@ function updateMemoryDisplay(memoryOutput) {
             if (!Number.isNaN(value)) {
                 memoryData.push({
                     address: addr + index,
-                    value: value & 0xff
+                    value: value & 0xff,
                 });
             }
         });
@@ -2673,9 +2677,10 @@ function updateMemoryDisplay(memoryOutput) {
     // Header row
     html += '<div class="memory-header">';
     html += '<span class="mem-addr-header">Address</span>';
-    html += '<span class="mem-hex-header">+0 +1 +2 +3  +4 +5 +6 +7  +8 +9 +A +B  +C +D +E +F</span>';
+    html +=
+        '<span class="mem-hex-header">+0 +1 +2 +3  +4 +5 +6 +7  +8 +9 +A +B  +C +D +E +F</span>';
     html += '<span class="mem-ascii-header">ASCII</span>';
-    html += '</div>';
+    html += "</div>";
 
     // Align to 16-byte boundaries
     const startAddr = Math.floor(baseAddress / 16) * 16;
@@ -2685,26 +2690,29 @@ function updateMemoryDisplay(memoryOutput) {
         html += '<div class="memory-row">';
 
         // Address column
-        html += `<span class="memory-address">0x${addr.toString(16).padStart(8, '0').toUpperCase()}</span>`;
+        html += `<span class="memory-address">0x${addr
+            .toString(16)
+            .padStart(8, "0")
+            .toUpperCase()}</span>`;
 
         // Hex bytes column - grouped by 4 bytes (words)
         html += '<span class="memory-hex">';
-        let ascii = '';
+        let ascii = "";
 
         for (let i = 0; i < 16; i++) {
             const byteAddr = addr + i;
-            const memByte = memoryData.find(m => m.address === byteAddr);
+            const memByte = memoryData.find((m) => m.address === byteAddr);
 
             if (memByte) {
-                const hexStr = memByte.value.toString(16).padStart(2, '0').toUpperCase();
+                const hexStr = memByte.value.toString(16).padStart(2, "0").toUpperCase();
                 html += `<span class="mem-byte">${hexStr}</span>`;
 
                 // ASCII representation
                 const ch = memByte.value;
-                ascii += (ch >= 32 && ch <= 126) ? String.fromCharCode(ch) : '·';
+                ascii += ch >= 32 && ch <= 126 ? String.fromCharCode(ch) : "·";
             } else {
                 html += '<span class="mem-byte mem-empty">··</span>';
-                ascii += '·';
+                ascii += "·";
             }
 
             // Add spacing every 4 bytes (word boundary)
@@ -2712,15 +2720,15 @@ function updateMemoryDisplay(memoryOutput) {
                 html += '<span class="mem-spacer"> </span>';
             }
         }
-        html += '</span>';
+        html += "</span>";
 
         // ASCII column
         html += `<span class="memory-ascii">${ascii}</span>`;
 
-        html += '</div>';
+        html += "</div>";
     }
 
-    html += '</div>';
+    html += "</div>";
     memoryDisplay.innerHTML = html;
 }
 
@@ -3850,15 +3858,28 @@ function parseEmulatorOutputForTrace(chunk) {
 
         // Parse register changes: >> rf[x02] 0 -> 10000
         const regMatch = trimmedLine.match(
-            /^>>\s*rf\[(\w+)\]\s*[0-9a-fA-Fx]+\s*->\s*([0-9a-fA-Fx]+)$/
+            /^>>\s*rf\[(\w+)\]\s*([0-9a-fA-Fx]+)\s*->\s*([0-9a-fA-Fx]+)$/
         );
         if (regMatch) {
-            const [, regName, newValue] = regMatch;
+            const [, regName, oldValue, newValue] = regMatch;
             // Convert to hex string for consistency
-            const hexValue = parseInt(newValue, newValue.startsWith("0x") ? 16 : 10).toString(16);
+            const oldHex = parseInt(oldValue, oldValue.startsWith("0x") ? 16 : 10).toString(16);
+            const newHex = parseInt(newValue, newValue.startsWith("0x") ? 16 : 10).toString(16);
+
+            console.log(`🔍 Register change detected: ${regName} ${oldHex} -> ${newHex}`);
+
+            // Only set previousRegisterValues if it's not already set (to preserve step context)
+            // During step execution, previousRegisterValues is set at the start of the step
+            if (!stepExecutionInProgress) {
+                previousRegisterValues[regName] = oldHex;
+            }
 
             // Always update register values, even when terminal output is suppressed
-            currentRegisterValues[regName] = hexValue;
+            currentRegisterValues[regName] = newHex;
+
+            console.log(
+                `📊 Previous: ${previousRegisterValues[regName]}, Current: ${currentRegisterValues[regName]}`
+            );
 
             // Update registers display automatically
             updateRegistersFromCurrentValues();
@@ -4254,87 +4275,91 @@ const riscvInstructions = {
         implementation: "// No operation",
         encoding: "000000000000 00000 000 00000 0010011",
         example: "nop  # do nothing",
-    beqz: {
-        name: "Branch if Equal to Zero",
-        format: "beqz rs1, offset",
-        category: "Pseudo",
-        description: "Takes the branch if register rs1 equals zero. Pseudo-instruction for beq rs1, x0, offset.",
-        implementation: "if (x[rs1] == 0) pc += sext(offset)",
-        encoding: "beq rs1, x0, offset",
-        example: "beqz x1, loop  # if x1 == 0, goto loop",
-    },
-    bnez: {
-        name: "Branch if Not Equal to Zero",
-        format: "bnez rs1, offset",
-        category: "Pseudo",
-        description: "Takes the branch if register rs1 is not equal to zero. Pseudo-instruction for bne rs1, x0, offset.",
-        implementation: "if (x[rs1] != 0) pc += sext(offset)",
-        encoding: "bne rs1, x0, offset",
-        example: "bnez x1, loop  # if x1 != 0, goto loop",
-    },
-    ret: {
-        name: "Return from subroutine",
-        format: "ret",
-        category: "Pseudo",
-        description: "Returns from a subroutine. Pseudo-instruction for jalr x0, x1, 0 (jump to address in ra).",
-        implementation: "pc = x[ra]",
-        encoding: "jalr x0, x1, 0",
-        example: "ret  # return from function",
-    },
-    j: {
-        name: "Jump",
-        format: "j offset",
-        category: "Pseudo",
-        description: "Unconditional jump. Pseudo-instruction for jal x0, offset.",
-        implementation: "pc += sext(offset)",
-        encoding: "jal x0, offset",
-        example: "j loop  # jump to loop",
-    },
-    jr: {
-        name: "Jump Register",
-        format: "jr rs1",
-        category: "Pseudo",
-        description: "Jump to address in register. Pseudo-instruction for jalr x0, rs1, 0.",
-        implementation: "pc = x[rs1]",
-        encoding: "jalr x0, rs1, 0",
-        example: "jr x1  # jump to address in x1",
-    },
-    call: {
-        name: "Call subroutine",
-        format: "call offset",
-        category: "Pseudo",
-        description: "Call a subroutine. Pseudo-instruction that expands to auipc+jalr.",
-        implementation: "x[ra] = pc+4; pc += sext(offset)",
-        encoding: "auipc/jalr sequence",
-        example: "call function  # call function",
-    },
-    li: {
-        name: "Load Immediate",
-        format: "li rd, imm",
-        category: "Pseudo",
-        description: "Load immediate value into register. Expands to lui+addi or just addi for small values.",
-        implementation: "x[rd] = immediate",
-        encoding: "lui/addi sequence",
-        example: "li x1, 0x12345  # x1 = 0x12345",
-    },
-    la: {
-        name: "Load Address",
-        format: "la rd, symbol",
-        category: "Pseudo",
-        description: "Load address of symbol. Expands to auipc+addi.",
-        implementation: "x[rd] = address_of(symbol)",
-        encoding: "auipc/addi sequence",
-        example: "la x1, data  # x1 = address of data",
-    },
-    mv: {
-        name: "Move",
-        format: "mv rd, rs",
-        category: "Pseudo",
-        description: "Copy register. Pseudo-instruction for addi rd, rs, 0.",
-        implementation: "x[rd] = x[rs]",
-        encoding: "addi rd, rs, 0",
-        example: "mv x1, x2  # x1 = x2",
-    },
+        beqz: {
+            name: "Branch if Equal to Zero",
+            format: "beqz rs1, offset",
+            category: "Pseudo",
+            description:
+                "Takes the branch if register rs1 equals zero. Pseudo-instruction for beq rs1, x0, offset.",
+            implementation: "if (x[rs1] == 0) pc += sext(offset)",
+            encoding: "beq rs1, x0, offset",
+            example: "beqz x1, loop  # if x1 == 0, goto loop",
+        },
+        bnez: {
+            name: "Branch if Not Equal to Zero",
+            format: "bnez rs1, offset",
+            category: "Pseudo",
+            description:
+                "Takes the branch if register rs1 is not equal to zero. Pseudo-instruction for bne rs1, x0, offset.",
+            implementation: "if (x[rs1] != 0) pc += sext(offset)",
+            encoding: "bne rs1, x0, offset",
+            example: "bnez x1, loop  # if x1 != 0, goto loop",
+        },
+        ret: {
+            name: "Return from subroutine",
+            format: "ret",
+            category: "Pseudo",
+            description:
+                "Returns from a subroutine. Pseudo-instruction for jalr x0, x1, 0 (jump to address in ra).",
+            implementation: "pc = x[ra]",
+            encoding: "jalr x0, x1, 0",
+            example: "ret  # return from function",
+        },
+        j: {
+            name: "Jump",
+            format: "j offset",
+            category: "Pseudo",
+            description: "Unconditional jump. Pseudo-instruction for jal x0, offset.",
+            implementation: "pc += sext(offset)",
+            encoding: "jal x0, offset",
+            example: "j loop  # jump to loop",
+        },
+        jr: {
+            name: "Jump Register",
+            format: "jr rs1",
+            category: "Pseudo",
+            description: "Jump to address in register. Pseudo-instruction for jalr x0, rs1, 0.",
+            implementation: "pc = x[rs1]",
+            encoding: "jalr x0, rs1, 0",
+            example: "jr x1  # jump to address in x1",
+        },
+        call: {
+            name: "Call subroutine",
+            format: "call offset",
+            category: "Pseudo",
+            description: "Call a subroutine. Pseudo-instruction that expands to auipc+jalr.",
+            implementation: "x[ra] = pc+4; pc += sext(offset)",
+            encoding: "auipc/jalr sequence",
+            example: "call function  # call function",
+        },
+        li: {
+            name: "Load Immediate",
+            format: "li rd, imm",
+            category: "Pseudo",
+            description:
+                "Load immediate value into register. Expands to lui+addi or just addi for small values.",
+            implementation: "x[rd] = immediate",
+            encoding: "lui/addi sequence",
+            example: "li x1, 0x12345  # x1 = 0x12345",
+        },
+        la: {
+            name: "Load Address",
+            format: "la rd, symbol",
+            category: "Pseudo",
+            description: "Load address of symbol. Expands to auipc+addi.",
+            implementation: "x[rd] = address_of(symbol)",
+            encoding: "auipc/addi sequence",
+            example: "la x1, data  # x1 = address of data",
+        },
+        mv: {
+            name: "Move",
+            format: "mv rd, rs",
+            category: "Pseudo",
+            description: "Copy register. Pseudo-instruction for addi rd, rs, 0.",
+            implementation: "x[rd] = x[rs]",
+            encoding: "addi rd, rs, 0",
+            example: "mv x1, x2  # x1 = x2",
+        },
     },
 
     // Additional Load/Store Instructions
@@ -4757,10 +4782,15 @@ function updateRegistersFromCurrentValues() {
     html += "</div>";
     registersGrid.innerHTML = html;
 
-    // Remove highlighting after animation
+    // Remove highlighting after animation and sync previous values
     setTimeout(() => {
         const changed = registersGrid.querySelectorAll(".changed");
         changed.forEach((el) => el.classList.remove("changed"));
+
+        // After highlighting is done, update previousRegisterValues to match current
+        // This allows the next change to be detected properly
+        previousRegisterValues = { ...currentRegisterValues };
+        console.log("✅ Synced previousRegisterValues after highlighting");
     }, 4000);
 }
 
@@ -5261,7 +5291,7 @@ function initCPUlatorFeatures() {
 
     // Initialize registers display
     updateRegistersFromCurrentValues();
-    
+
     // Initialize call stack display
     updateCallStackLogDisplay();
 
