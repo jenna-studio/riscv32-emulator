@@ -1112,8 +1112,10 @@ function toggleFileView() {
 
     const editorTitle = document.getElementById("editorTitle");
 
+    // Gate on the backing file, not its text - an empty (or cleared) counterpart
+    // is still a file worth switching to.
     if (currentViewMode === "assembly") {
-        if (!currentFiles.c) {
+        if (!filePaths.c) {
             showNotification("No C file available for the current file.", "info");
             return;
         }
@@ -1121,7 +1123,7 @@ function toggleFileView() {
         toggleBtn.innerHTML = '<i class="fas fa-exchange-alt"></i> Switch to Assembly';
         editorTitle.textContent = "C Editor";
     } else {
-        if (!currentFiles.assembly) {
+        if (!filePaths.assembly) {
             showNotification("No assembly file available for the current file.", "info");
             return;
         }
@@ -1143,25 +1145,52 @@ function fileNameFromPath(filePath) {
     return parts[parts.length - 1] || "";
 }
 
-// Conservative generalization of the hardcoded dual-view table: a ".s" file gets a
-// C view when a sibling ".c" exists, which is the same condition that gates
-// cFileAvailable for the shipped examples.
-// Path of the .c file that sits next to an assembly file, e.g. sort.s -> sort.c
-function siblingCPath(filePath) {
+// Conservative generalization of the hardcoded dual-view table: a file gets its
+// counterpart view when a sibling with the paired extension exists, which is the
+// same condition that gates cFileAvailable for the shipped examples.
+const ASSEMBLY_EXTENSIONS = [".s", ".S", ".asm"];
+
+function isCSourcePath(filePath) {
+    const lower = String(filePath || "").toLowerCase();
+    return lower.endsWith(".c") || lower.endsWith(".h");
+}
+
+// Same path with a different extension, e.g. sort.s -> sort.c
+function withExtension(filePath, extension) {
     if (!filePath) return null;
     const dot = filePath.lastIndexOf(".");
     if (dot <= filePath.lastIndexOf("/")) return null;
-    return filePath.slice(0, dot) + ".c";
+    return filePath.slice(0, dot) + extension;
 }
 
-async function readSiblingCFile(filePath) {
-    const candidate = siblingCPath(filePath);
-    if (!candidate || candidate === filePath) return null;
+function siblingCPath(filePath) {
+    return withExtension(filePath, ".c");
+}
+
+async function readIfExists(candidate, originalPath) {
+    if (!candidate || candidate === originalPath) return null;
     try {
         return await window.api.readFile(candidate);
     } catch {
         return null;
     }
+}
+
+// The .c that pairs with an assembly file.
+async function readSiblingCFile(filePath) {
+    const candidate = siblingCPath(filePath);
+    const content = await readIfExists(candidate, filePath);
+    return content === null ? null : { path: candidate, content };
+}
+
+// The assembly file that pairs with a .c/.h - the extension is unknown, so try each.
+async function readSiblingAssemblyFile(filePath) {
+    for (const ext of ASSEMBLY_EXTENSIONS) {
+        const candidate = withExtension(filePath, ext);
+        const content = await readIfExists(candidate, filePath);
+        if (content !== null) return { path: candidate, content };
+    }
+    return null;
 }
 
 async function loadFile(filePath) {
@@ -1187,34 +1216,34 @@ async function loadFile(filePath) {
 
         document.getElementById("asmLabel").textContent = fileName;
 
-        let hasCView = false;
-        const lowerName = fileName.toLowerCase();
-        const isCSource = lowerName.endsWith(".c") || lowerName.endsWith(".h");
+        // True when both an assembly and a C file back this editor.
+        let hasBothViews = false;
 
-        if (!isCSource) {
+        if (!isCSourcePath(fileName)) {
+            const sibling = await readSiblingCFile(filePath);
+            hasBothViews = sibling !== null;
+
             asmPath = filePath;
             filePaths.assembly = filePath;
-            filePaths.c = null;
-
-            const cContent = await readSiblingCFile(filePath);
-            hasCView = cContent !== null;
-            if (hasCView) {
-                filePaths.c = siblingCPath(filePath);
-            }
+            filePaths.c = hasBothViews ? sibling.path : null;
 
             setModelContent("assembly", content, true);
-            setModelContent("c", cContent ?? "", true);
+            setModelContent("c", sibling?.content ?? "", true);
             setEditorView("assembly");
             editorTitle.textContent = "Assembly Editor";
             document.getElementById("toggleView").innerHTML =
                 '<i class="fas fa-exchange-alt"></i> Switch to C';
         } else {
-            asmPath = null;
-            filePaths.assembly = null;
+            // A .c opens with its assembly counterpart when one sits beside it.
+            const sibling = await readSiblingAssemblyFile(filePath);
+            hasBothViews = sibling !== null;
+
+            asmPath = sibling?.path ?? null;
+            filePaths.assembly = sibling?.path ?? null;
             filePaths.c = filePath;
 
             setModelContent("c", content, true);
-            setModelContent("assembly", "");
+            setModelContent("assembly", sibling?.content ?? "", true);
             setEditorView("c");
             editorTitle.textContent = "C Editor";
             document.getElementById("toggleView").innerHTML =
@@ -1226,7 +1255,7 @@ async function loadFile(filePath) {
 
         ideState.fileLoaded = true;
         ideState.editorDirty = false;
-        ideState.cFileAvailable = hasCView;
+        ideState.cFileAvailable = hasBothViews;
         updateButtonStates();
         showNotification(`Loaded: ${fileName}`, "success");
     } catch (error) {
@@ -1249,11 +1278,38 @@ async function saveFile() {
         const content = currentEditor.getValue();
         await window.api.saveFile(targetPath, content);
         ideState.editorDirty = false;
+        await refreshCounterpartFile();
         updateButtonStates();
         showNotification(`Saved: ${fileNameFromPath(targetPath)}`, "success");
     } catch (error) {
         showNotification(`Failed to save file: ${error.message}`, "error");
     }
+}
+
+// A counterpart file can appear on disk after the current file was opened (saved
+// from another view, created outside the IDE); re-check so Switch View catches up.
+async function refreshCounterpartFile() {
+    if (filePaths.assembly && filePaths.c) {
+        ideState.cFileAvailable = true;
+        return;
+    }
+
+    if (filePaths.assembly && !filePaths.c) {
+        const sibling = await readSiblingCFile(filePaths.assembly);
+        if (sibling) {
+            filePaths.c = sibling.path;
+            setModelContent("c", sibling.content);
+        }
+    } else if (filePaths.c && !filePaths.assembly) {
+        const sibling = await readSiblingAssemblyFile(filePaths.c);
+        if (sibling) {
+            filePaths.assembly = sibling.path;
+            asmPath = sibling.path;
+            setModelContent("assembly", sibling.content);
+        }
+    }
+
+    ideState.cFileAvailable = Boolean(filePaths.assembly && filePaths.c);
 }
 
 async function loadFilePair(fileName) {
