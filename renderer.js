@@ -16,6 +16,22 @@ let filePaths = {
     c: null,
 };
 let breakpoints = new Set();
+
+// Command bar history: historyIndex === commandHistory.length means "not browsing",
+// and pendingCommand holds whatever was typed before the user started browsing.
+const COMMON_COMMANDS = ["s", "c", "r", "l", "m", "b", "q"];
+let commandHistory = [];
+let historyIndex = 0;
+let pendingCommand = "";
+
+function pushCommandHistory(command) {
+    if (commandHistory[commandHistory.length - 1] !== command) {
+        commandHistory.push(command);
+    }
+    historyIndex = commandHistory.length;
+    pendingCommand = "";
+}
+
 let monacoEditor = null;
 let monacoModels = {
     assembly: null,
@@ -286,6 +302,11 @@ function updateButtonStates() {
     document.getElementById("reload").disabled = !emulatorRunning;
     document.getElementById("stop").disabled = !emulatorRunning;
 
+    // Debug controls, which sit in the toolbar next to Stop
+    document.querySelectorAll(".compile-controls .debug-btn").forEach((btn) => {
+        btn.disabled = !emulatorRunning;
+    });
+
     // Editor bar
     document.getElementById("saveFile").disabled = !fileLoaded || !editorDirty;
     document.getElementById("toggleView").disabled = !cFileAvailable;
@@ -297,18 +318,6 @@ function updateButtonStates() {
         const labelNode = group.querySelector(".group-label");
         const label = labelNode ? labelNode.textContent : "";
         const controls = group.querySelectorAll("button, input");
-
-        if (label === "Debug Control") {
-            controls.forEach((control) => {
-                const cmd = control.getAttribute("data-cmd");
-                if (cmd === "restart") {
-                    control.disabled = !fileLoaded;
-                } else {
-                    control.disabled = !emulatorRunning;
-                }
-            });
-            return;
-        }
 
         let disable = false;
         if (["View", "Memory"].includes(label)) {
@@ -527,122 +536,16 @@ function initTerminal() {
         },
     };
 
-    // Add interactive terminal input line
-    const inputLine = document.createElement("div");
-    inputLine.className = "terminal-input-line";
-    inputLine.style.cssText = `
-        display: flex;
-    align-items: center;
-    padding: 4px 8px;
-    background: #f9f5ff;
-    border: 3px solid #c0f7df;
-    font-family: Consolas, Monaco, "Courier New", monospace;
-    font-size: 13px;
-    color: #777;
-    font-weight: 500;
-    border-radius: 8px;
-    margin-bottom: 8px;
-    `;
-
-    const prompt = document.createElement("span");
-    prompt.textContent = ">> ";
-    prompt.style.cssText = "color: #01bb01; margin-right: 4px;";
-
-    const input = document.createElement("input");
-    input.type = "text";
-    input.className = "terminal-input";
-    input.style.cssText = `
-        flex: 1;
-    background: transparent !important;
-    border: none !important;
-    outline: none !important;
-    color: #777;
-    font-family: inherit;
-    font-size: inherit;
-    font-weight: 600;
-    box-shadow: none !important;
-    `;
-    input.placeholder = "Type a command...";
-
-    inputLine.appendChild(prompt);
-    inputLine.appendChild(input);
-    terminalContainer.appendChild(inputLine);
-
-    // Command history
-    let commandHistory = [];
-    let historyIndex = -1;
-    let currentCommand = "";
-
-    // Handle keyboard events for terminal input
-    input.addEventListener("keydown", async (e) => {
-        switch (e.key) {
-            case "Enter":
-                e.preventDefault();
-                const command = input.value.trim();
-                if (command) {
-                    // Add to history
-                    commandHistory.push(command);
-                    historyIndex = commandHistory.length;
-
-                    // sendCommand echoes the command itself
-                    await sendCommand(command);
-
-                    // Clear input
-                    input.value = "";
-                    currentCommand = "";
-                }
-                break;
-
-            case "ArrowUp":
-                e.preventDefault();
-                if (historyIndex > 0) {
-                    if (historyIndex === commandHistory.length) {
-                        currentCommand = input.value;
-                    }
-                    historyIndex--;
-                    input.value = commandHistory[historyIndex];
-                }
-                break;
-
-            case "ArrowDown":
-                e.preventDefault();
-                if (historyIndex < commandHistory.length) {
-                    historyIndex++;
-                    if (historyIndex === commandHistory.length) {
-                        input.value = currentCommand;
-                    } else {
-                        input.value = commandHistory[historyIndex];
-                    }
-                }
-                break;
-
-            case "Tab":
-                e.preventDefault();
-                // Simple tab completion for common commands
-                const partial = input.value.toLowerCase();
-                const commonCommands = ["s", "c", "r", "l", "m", "b", "q"];
-                const matches = commonCommands.filter((cmd) => cmd.startsWith(partial));
-                if (matches.length === 1) {
-                    input.value = matches[0];
-                } else if (matches.length > 1) {
-                    terminal.writeln(`Possible completions: ${matches.join(", ")}`);
-                }
-                break;
-        }
-    });
-
-    // Focus the input when terminal is clicked
+    // Clicking the terminal focuses the command bar below it
     terminalContainer.addEventListener("click", () => {
-        input.focus();
+        const cmdInput = document.getElementById("cmd");
+        if (cmdInput && !cmdInput.disabled) cmdInput.focus();
     });
-
-    // Auto-focus the input initially
-    setTimeout(() => input.focus(), 100);
 
     terminal.writeln("# RISC-V IDE Terminal");
-    terminal.writeln("# Ready for emulation - Type commands directly or use the input field below");
+    terminal.writeln("# Ready for emulation - Type commands in the bar below");
     terminal.writeln("");
-    console.log("✅ Terminal initialized with interactive input");
+    console.log("✅ Terminal initialized");
 }
 
 function getModelForMode(mode) {
@@ -1243,9 +1146,17 @@ function fileNameFromPath(filePath) {
 // Conservative generalization of the hardcoded dual-view table: a ".s" file gets a
 // C view when a sibling ".c" exists, which is the same condition that gates
 // cFileAvailable for the shipped examples.
+// Path of the .c file that sits next to an assembly file, e.g. sort.s -> sort.c
+function siblingCPath(filePath) {
+    if (!filePath) return null;
+    const dot = filePath.lastIndexOf(".");
+    if (dot <= filePath.lastIndexOf("/")) return null;
+    return filePath.slice(0, dot) + ".c";
+}
+
 async function readSiblingCFile(filePath) {
-    if (!filePath || !filePath.toLowerCase().endsWith(".s")) return null;
-    const candidate = filePath.slice(0, -2) + ".c";
+    const candidate = siblingCPath(filePath);
+    if (!candidate || candidate === filePath) return null;
     try {
         return await window.api.readFile(candidate);
     } catch {
@@ -1277,8 +1188,10 @@ async function loadFile(filePath) {
         document.getElementById("asmLabel").textContent = fileName;
 
         let hasCView = false;
+        const lowerName = fileName.toLowerCase();
+        const isCSource = lowerName.endsWith(".c") || lowerName.endsWith(".h");
 
-        if (fileName.toLowerCase().endsWith(".s")) {
+        if (!isCSource) {
             asmPath = filePath;
             filePaths.assembly = filePath;
             filePaths.c = null;
@@ -1286,7 +1199,7 @@ async function loadFile(filePath) {
             const cContent = await readSiblingCFile(filePath);
             hasCView = cContent !== null;
             if (hasCView) {
-                filePaths.c = filePath.slice(0, -2) + ".c";
+                filePaths.c = siblingCPath(filePath);
             }
 
             setModelContent("assembly", content, true);
@@ -1295,7 +1208,7 @@ async function loadFile(filePath) {
             editorTitle.textContent = "Assembly Editor";
             document.getElementById("toggleView").innerHTML =
                 '<i class="fas fa-exchange-alt"></i> Switch to C';
-        } else if (fileName.toLowerCase().endsWith(".c")) {
+        } else {
             asmPath = null;
             filePaths.assembly = null;
             filePaths.c = filePath;
@@ -1412,21 +1325,20 @@ async function loadExampleFiles() {
         empty.textContent = "No examples found";
         examplesList.appendChild(empty);
         console.log("⚠️ No example files found in examples/");
-        return;
+    } else {
+        examples.forEach(({ name, assembly, c }) => {
+            fileMapping[name] = { assembly, c };
+
+            const item = document.createElement("div");
+            item.className = "file-item";
+            item.innerHTML = `<i class="fas fa-file-code"></i> ${name}`;
+            item.style.cursor = "pointer";
+            item.title = c ? `${name} (+ C source)` : name;
+            item.addEventListener("click", () => loadFilePair(name));
+            examplesList.appendChild(item);
+        });
+        console.log(`✅ Example files loaded (${examples.length})`);
     }
-
-    examples.forEach(({ name, assembly, c }) => {
-        fileMapping[name] = { assembly, c };
-
-        const item = document.createElement("div");
-        item.className = "file-item";
-        item.innerHTML = `<i class="fas fa-file-code"></i> ${name}`;
-        item.style.cursor = "pointer";
-        item.title = c ? `${name} (+ C source)` : name;
-        item.addEventListener("click", () => loadFilePair(name));
-        examplesList.appendChild(item);
-    });
-    console.log(`✅ Example files loaded (${examples.length})`);
 
     // Load workspace files if workspace is set
     if (currentWorkspaceFolder) {
@@ -1516,17 +1428,13 @@ function clearWorkspaceFiles() {
     }
 }
 
+// Values are always shown as 32-bit hex.
 function formatNumberByDisplayOption(value) {
     if (!value) return value;
 
-    const formatSelect = document.getElementById("numberFormat");
-    const format = formatSelect ? formatSelect.value : "hex";
-
     // Convert hex string to number if needed
     let num;
-    if (typeof value === "string" && value.startsWith("0x")) {
-        num = parseInt(value, 16);
-    } else if (typeof value === "string") {
+    if (typeof value === "string") {
         num = parseInt(value, 16); // Assume hex if string
     } else {
         num = value;
@@ -1537,17 +1445,7 @@ function formatNumberByDisplayOption(value) {
     // Convert to unsigned 32-bit for proper display
     num = num >>> 0;
 
-    switch (format) {
-        case "dec":
-            return num.toString(10);
-        case "bin":
-            return "0b" + num.toString(2).padStart(32, "0");
-        case "oct":
-            return "0o" + num.toString(8);
-        case "hex":
-        default:
-            return "0x" + num.toString(16).padStart(8, "0");
-    }
+    return "0x" + num.toString(16).padStart(8, "0");
 }
 
 function normalizeDebuggerCommand(command) {
@@ -1671,42 +1569,6 @@ function addQuickCommands() {
 async function syncBreakpoints() {
     for (const lineNum of breakpoints) {
         await enqueueEmulatorCommand(`b${lineNum}`);
-    }
-}
-
-// The Run button restarts the program from the beginning: respawn the emulator on
-// the same file, replay the breakpoints, then run to the first breakpoint or exit.
-async function restartProgram() {
-    if (!asmPath) {
-        showNotification("No assembly file loaded", "error");
-        return;
-    }
-
-    try {
-        await window.api.stopEmu();
-        ideState.emulatorRunning = false;
-
-        previousRegisterValues = {};
-        currentRegisterValues = {};
-        currentExecutionLine = null;
-
-        const runRes = await window.api.runEmu(asmPath);
-        if (!runRes.ok) {
-            showNotification(`Failed to start emulator: ${runRes.error || "Unknown error"}`, "error");
-            updateButtonStates();
-            return;
-        }
-
-        ideState.emulatorRunning = true;
-        updateButtonStates();
-
-        await syncBreakpoints();
-        await sendCommand("c");
-    } catch (error) {
-        console.error("Restart failed:", error);
-        showNotification(`Restart failed: ${error.message}`, "error");
-    } finally {
-        updateButtonStates();
     }
 }
 
@@ -2024,14 +1886,55 @@ function setupButtonHandlers() {
         const cmdInput = document.getElementById("cmd");
         const command = cmdInput.value.trim();
         if (command) {
+            pushCommandHistory(command);
             sendCommand(command);
             cmdInput.value = "";
         }
     });
 
-    document.getElementById("cmd").addEventListener("keypress", (e) => {
-        if (e.key === "Enter") {
-            document.getElementById("send").click();
+    // History (up/down) and tab completion for the command bar
+    document.getElementById("cmd").addEventListener("keydown", (e) => {
+        const cmdInput = e.currentTarget;
+
+        switch (e.key) {
+            case "Enter":
+                e.preventDefault();
+                document.getElementById("send").click();
+                break;
+
+            case "ArrowUp":
+                e.preventDefault();
+                if (historyIndex > 0) {
+                    if (historyIndex === commandHistory.length) {
+                        pendingCommand = cmdInput.value;
+                    }
+                    historyIndex--;
+                    cmdInput.value = commandHistory[historyIndex];
+                }
+                break;
+
+            case "ArrowDown":
+                e.preventDefault();
+                if (historyIndex < commandHistory.length) {
+                    historyIndex++;
+                    cmdInput.value =
+                        historyIndex === commandHistory.length
+                            ? pendingCommand
+                            : commandHistory[historyIndex];
+                }
+                break;
+
+            case "Tab": {
+                e.preventDefault();
+                const partial = cmdInput.value.trim().toLowerCase();
+                const matches = COMMON_COMMANDS.filter((cmd) => cmd.startsWith(partial));
+                if (matches.length === 1) {
+                    cmdInput.value = matches[0];
+                } else if (matches.length > 1) {
+                    terminal.writeln(`Possible completions: ${matches.join(", ")}`);
+                }
+                break;
+            }
         }
     });
 
@@ -2103,6 +2006,19 @@ function setupButtonHandlers() {
         }
     });
 
+    // Sidebar collapse - the editor column absorbs the freed width (see styles.css)
+    document.getElementById("toggleSidebar").addEventListener("click", () => {
+        const sidebar = document.getElementById("sidebar");
+        const layout = document.getElementById("mainLayout");
+        const collapsed = sidebar.classList.toggle("collapsed");
+
+        layout.classList.toggle("sidebar-collapsed", collapsed);
+
+        const toggle = document.getElementById("toggleSidebar");
+        toggle.setAttribute("aria-expanded", String(!collapsed));
+        toggle.title = collapsed ? "Expand file sidebar" : "Collapse file sidebar";
+    });
+
     // Folder management
     document.getElementById("chooseFolder").addEventListener("click", async () => {
         const folder = await window.api.pickFolder();
@@ -2110,13 +2026,8 @@ function setupButtonHandlers() {
             currentWorkspaceFolder = folder;
             showNotification(`Workspace folder set to: ${folder}`, "success");
             // Refresh file list
-            document.getElementById("refreshFiles").click();
+            await loadExampleFiles();
         }
-    });
-
-    document.getElementById("refreshFiles").addEventListener("click", async () => {
-        showNotification("Refreshing file list...", "info");
-        await loadExampleFiles();
     });
 
     // Memory refresh button
@@ -2186,12 +2097,7 @@ function setupButtonHandlers() {
     document.querySelectorAll("[data-cmd]").forEach((btn) => {
         btn.addEventListener("click", async () => {
             const cmd = btn.getAttribute("data-cmd");
-            if (cmd === "q") {
-                // Use the same logic as the main stop button
-                document.getElementById("stop").click();
-            } else if (cmd === "restart") {
-                await restartProgram();
-            } else if (cmd === "s") {
+            if (cmd === "s") {
                 await performSingleStep();
             } else if (cmd === "info registers") {
                 // VIEW panel: Registers button
@@ -2209,15 +2115,6 @@ function setupButtonHandlers() {
                 sendCommand(cmd);
             }
         });
-    });
-
-    // Display format dropdown handler
-    document.getElementById("numberFormat").addEventListener("change", (e) => {
-        const format = e.target.value;
-        showNotification(`Display format changed to ${format}`, "info");
-        // Refresh register display with new format
-        updateRegistersFromCurrentValues();
-        // Note: memory and disassembly displays handle their own formatting
     });
 
     // Add keyboard navigation
@@ -2238,14 +2135,14 @@ function setupButtonHandlers() {
         // F5 for run, F10 for step
         if (e.key === "F5" && !e.shiftKey) {
             e.preventDefault();
-            document.querySelector('[data-cmd="restart"]')?.click();
+            document.getElementById("reload")?.click();
         } else if (e.key === "F10") {
             e.preventDefault();
             const stepButton = document.querySelector('[data-cmd="s"]');
             stepButton?.click();
         } else if (e.key === "F5" && e.shiftKey) {
             e.preventDefault();
-            document.querySelector('[data-cmd="q"]')?.click();
+            document.getElementById("stop").click();
         }
 
         // Escape to focus terminal command input
@@ -2278,12 +2175,6 @@ function setupButtonHandlers() {
             switchToPanel("memory");
         } else {
             terminal.writeln(`Error: ${result.error}`);
-        }
-    });
-
-    document.getElementById("memFormat").addEventListener("change", () => {
-        if (lastMemoryOutput) {
-            updateMemoryDisplay(lastMemoryOutput);
         }
     });
 
@@ -2708,9 +2599,9 @@ async function refreshDisassemblyPanel(startAddr, count = 20) {
 // Remembered so the format selector can re-render without re-querying the emulator.
 let lastMemoryOutput = null;
 
+// Memory is always rendered as hex.
 function getMemoryFormat() {
-    const select = document.getElementById("memFormat");
-    return select ? select.value : "x";
+    return "x";
 }
 
 function parseMemoryDump(memoryOutput) {
@@ -4439,13 +4330,7 @@ function updateRegistersFromCurrentValues() {
     console.log("Current values:", Object.keys(currentRegisterValues).length, "registers");
     console.log("Previous values:", Object.keys(previousRegisterValues).length, "registers");
 
-    // Check if binary format is selected to use 2-column layout
-    const formatSelect = document.getElementById("numberFormat");
-    const format = formatSelect ? formatSelect.value : "hex";
-    const isBinaryFormat = format === "bin";
-    const tableClass = isBinaryFormat ? "register-table register-table-binary" : "register-table";
-
-    let html = `<div class="${tableClass}">`;
+    let html = `<div class="register-table">`;
 
     // Display all 32 RISC-V registers
     for (let i = 0; i < 32; i++) {

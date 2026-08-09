@@ -29,48 +29,20 @@
 <body>
     <div class="app-container">
         <div class="toolbar">
-            <button id="pick">
-                <i class="fas fa-folder-open"></i>
-                Open .s
+            <button id="chooseFolder" title="Choose workspace folder">
+                <i class="fas fa-folder-tree"></i>
+                Set Folder
             </button>
-            <button id="newFile">
+            <button id="pick" title="Open an assembly or C source file">
+                <i class="fas fa-file"></i>
+                Open
+            </button>
+            <button id="newFile" title="Create a new assembly or C source file">
                 <i class="fas fa-plus"></i>
-                New .s
+                New
             </button>
             <span id="asmLabel">No file selected</span>
             <div class="spacer"></div>
-            <div class="left-controls">
-                <div class="file-controls">
-                    <label for="numberFormat" id="displayFormat">Display</label>
-                    <select id="numberFormat" title="Number display format">
-                        <option value="hex">Hex</option>
-                        <option value="dec">Dec</option>
-                        <option value="bin">Bin</option>
-                        <option value="oct">Oct</option>
-                    </select>
-                    <label for="numberFormat" id="displayFormat">Go to</label>
-                    <input id="gotoAddress" placeholder="Address/Label" title="Go to address" size="10">
-                    <button id="gotoBtn" title="Navigate to address">
-                        <i class="fas fa-crosshairs"></i>
-                        Go
-                    </button>
-                </div>
-                <div class="memory-controls">
-                    <input id="memAddr" placeholder="0x10000000" title="Memory address" size="12">
-                    <select id="memFormat" title="Display format">
-                        <option value="x">Hex</option>
-                        <option value="d">Decimal</option>
-                        <option value="u">Unsigned</option>
-                        <option value="t">Binary</option>
-                        <option value="c">Char</option>
-                    </select>
-                    <input id="memLen" placeholder="16" size="4" title="Number of words">
-                    <button id="memBtn" title="Examine memory">
-                        <i class="fas fa-search"></i>
-                        Mem
-                    </button>
-                </div>
-            </div>
             <div class="compile-controls">
                 <button id="compileAndLoad">
                     <i class="fas fa-cogs"></i>
@@ -84,59 +56,22 @@
                     <i class="fas fa-stop"></i>
                     Stop
                 </button>
+                <button data-cmd="s" title="Step Into - Execute one instruction" class="debug-btn">
+                    <i class="fas fa-step-forward"></i>
+                    Step Into
+                </button>
+                <button data-cmd="c" title="Continue - run until the next breakpoint or program end" class="debug-btn">
+                    <i class="fas fa-play"></i>
+                    Continue
+                </button>
             </div>
         </div>
 
         <div class="quickbar">
             <div class="control-group">
-                <span class="group-label">Debug Control</span>
-                <div>
-                    <button data-cmd="s" title="Step Into - Execute one instruction" class="debug-btn">
-                        <i class="fas fa-step-forward"></i>
-                        Step Into
-                    </button>
-                    <button data-cmd="c" title="Continue - run until the next breakpoint or program end" class="debug-btn">
-                        <i class="fas fa-play"></i>
-                        Continue
-                    </button>
-                    <button data-cmd="restart" title="Run program from beginning" class="debug-btn success">
-                        <i class="fas fa-redo"></i>
-                        Run
-                    </button>
-                    <button data-cmd="q" title="Stop execution" class="debug-btn danger">
-                        <i class="fas fa-stop"></i>
-                        Stop
-                    </button>
-                </div>
-            </div>
-
-            <div class="control-group">
-                <span class="group-label">View</span>
-                <div>
-                    <button data-cmd="info registers" title="Show all registers with values">
-                        <i class="fas fa-microchip"></i>
-                        Registers
-                    </button>
-                    <button data-cmd="list" title="List source code around current PC">
-                        <i class="fas fa-file-code"></i>
-                        Source
-                    </button>
-                    <button data-cmd="disassemble" title="Show disassembly">
-                        <i class="fas fa-code"></i>
-                        Disassembly
-                    </button>
-                    <button data-cmd="info program" title="Show program status">
-                        <i class="fas fa-info-circle"></i>
-                        Status
-                    </button>
-                </div>
-            </div>
-
-
-            <div class="control-group">
                 <span class="group-label">Breakpoints</span>
-                <div>
-                    <input id="bpLine" placeholder="line#" title="Line number">
+                <div class="quickbar-row">
+                    <input id="bpLine" class="narrow" placeholder="line#" title="Line number">
                     <button id="bpSet" title="Set breakpoint">
                         <i class="fas fa-circle"></i>
                         Set
@@ -148,17 +83,38 @@
                 </div>
             </div>
 
+            <div class="control-group">
+                <span class="group-label">Navigation</span>
+                <div class="quickbar-row">
+                    <input id="gotoAddress" placeholder="Address/Label" title="Go to address">
+                    <button id="gotoBtn" title="Navigate to address">
+                        <i class="fas fa-crosshairs"></i>
+                        Go
+                    </button>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <span class="group-label">Memory</span>
+                <div class="quickbar-row">
+                    <input id="memAddr" placeholder="0x10000000" title="Memory address">
+                    <input id="memLen" class="narrow" placeholder="16" title="Number of words">
+                    <button id="memBtn" title="Examine memory">
+                        <i class="fas fa-search"></i>
+                        Mem
+                    </button>
+                </div>
+            </div>
         </div>
 
-        <div class="main-layout">
-            <div class="sidebar">
+        <div class="main-layout" id="mainLayout">
+            <div class="sidebar" id="sidebar">
                 <div class="sidebar-header">
-                    <i class="fas fa-folder"></i>
-                    Files
-                    <div class="sidebar-actions">
-                        <button id="chooseFolder" class="mini">Set Folder</button>
-                        <button id="refreshFiles" class="mini" title="Refresh file lists">↻</button>
-                    </div>
+                    <button id="toggleSidebar" class="sidebar-toggle" title="Collapse file sidebar"
+                        aria-expanded="true" aria-controls="sidebar">
+                        <i class="fas fa-folder"></i>
+                    </button>
+                    <span class="sidebar-title">Files</span>
                 </div>
                 <div class="file-list">
                     <div class="section">
@@ -422,19 +378,19 @@
                         </div>
                     </div>
                 </div>
-            </div>
-        </div>
 
-        <div class="cmdbar">
-            <input id="cmd" placeholder="Enter debugger command (ex: m0x1000 16, b5, s, c, r, l)">
-            <button id="send">
-                <i class="fas fa-paper-plane"></i>
-                Send
-            </button>
-            <button id="clearTerminal" title="Clear terminal output">
-                <i class="fas fa-sync"></i>
-                Clear
-            </button>
+                <div class="cmdbar">
+                    <input id="cmd" placeholder="Enter debugger command (ex: m0x1000 16, b5, s, c, r, l)">
+                    <button id="send">
+                        <i class="fas fa-paper-plane"></i>
+                        Send
+                    </button>
+                    <button id="clearTerminal" title="Clear terminal output">
+                        <i class="fas fa-sync"></i>
+                        Clear
+                    </button>
+                </div>
+            </div>
         </div>
     </div>
     <script src="./renderer.js" defer></script>

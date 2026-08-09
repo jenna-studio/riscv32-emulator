@@ -62,10 +62,15 @@ body {
     box-shadow: var(--shadow);
     flex-shrink: 0;
     min-height: 60px;
+    flex-wrap: wrap;
 }
 
 .toolbar .spacer {
     flex: 1 0 24px;
+}
+
+.compile-controls {
+    flex-wrap: wrap;
 }
 
 .toolbar-controls {
@@ -87,12 +92,6 @@ body {
 .toolbar-controls button {
     padding: 4px 8px;
     font-size: 12px;
-}
-
-.left-controls {
-    display: flex;
-    align-items: center;
-    gap: 16px;
 }
 
 .file-controls {
@@ -143,10 +142,40 @@ body {
     gap: 8px;
 }
 
+/* Both ends of the toolbar use the same button metrics: the file controls on
+   the left and the compile/debug controls on the right. */
+.toolbar > button,
 .compile-controls button {
     padding: 6px 12px;
     font-size: 12px;
     font-weight: 500;
+}
+
+/* Debug controls that live in the toolbar next to Stop. Each one carries its
+   own colour below; this rule only handles the shared layout. */
+.compile-controls .debug-btn {
+    border: 2px solid transparent;
+    margin: 0 !important;
+}
+
+/* Step Into - yellow */
+.compile-controls .debug-btn[data-cmd="s"] {
+    background: linear-gradient(135deg, var(--accent-yellow) 0%, #fff0a6 100%);
+    border-color: #e0cc5c;
+    color: #7a6a00;
+}
+
+/* Continue - lavender */
+.compile-controls .debug-btn[data-cmd="c"] {
+    background: linear-gradient(135deg, #e6e6fa 0%, #f2f1fd 100%);
+    border-color: #c3bfe8;
+    color: #4a2f7c;
+}
+
+/* Keep each button's own colour on hover, just lift it */
+.compile-controls .debug-btn:hover:not(:disabled) {
+    filter: brightness(1.04);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
 }
 
 /* Quickbar Styling */
@@ -166,7 +195,7 @@ body {
 .control-group {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 2px;
     align-items: flex-start;
 }
 
@@ -206,11 +235,12 @@ body {
 /* Main Layout */
 .main-layout {
     display: grid;
-    grid-template-columns: 250px 1fr 1fr;
+    grid-template-columns: 195px 1.15fr 1.3fr;
     grid-template-rows: 1fr;
     flex: 1;
     gap: 12px;
-    margin: 0 20px;
+    /* Bottom margin now that the command bar no longer closes off the window */
+    margin: 0 20px 12px;
     overflow: hidden;
 }
 
@@ -416,7 +446,7 @@ body {
 /* CPUlator-style Register Display */
 .register-table {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 8px;
     padding: 12px;
 }
@@ -455,14 +485,19 @@ body {
 .reg-value {
     font-weight: 500;
     color: var(--text-primary);
-    margin: 0 8px;
+    margin: 0 6px;
     flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .reg-alias {
     font-size: 11px;
     color: #015555;
     font-style: italic;
+    white-space: nowrap;
 }
 
 /* CPUlator-style Trace Display */
@@ -1014,10 +1049,13 @@ body {
     border-radius: var(--radius);
     box-shadow: var(--shadow);
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
 }
 
 .sidebar-header {
-    padding: 16px;
+    padding: 12px;
     background: var(--accent-lavender);
     border-bottom: 1px solid var(--border-light);
     font-weight: 600;
@@ -1025,13 +1063,60 @@ body {
     display: flex;
     align-items: center;
     gap: 8px;
-    justify-content: space-between;
+    justify-content: flex-start;
+}
+
+/* The folder icon doubles as the collapse/expand control */
+.sidebar-toggle {
+    padding: 4px 6px;
+    min-height: 0;
+    font-size: 13px;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    color: var(--text-primary);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.sidebar-toggle:hover {
+    background: rgba(255, 255, 255, 0.5);
+    box-shadow: none;
+}
+
+.sidebar-title {
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+/* Collapsed: only the toggle stays visible */
+.sidebar.collapsed .sidebar-title,
+.sidebar.collapsed .file-list {
+    display: none;
+}
+
+.sidebar.collapsed .sidebar-header {
+    padding: 12px 0;
+    justify-content: center;
+}
+
+.main-layout .sidebar.collapsed {
+    min-height: 0;
+}
+
+/* Freed width goes to the assembly editor, not the output panel. Skipped below
+   768px, where the layout is a single stacked column. */
+@media (min-width: 769px) {
+    .app-container .main-layout.sidebar-collapsed {
+        grid-template-columns: 44px 1.6fr 1.3fr;
+    }
 }
 
 .file-list {
     padding: 8px;
     overflow-y: auto;
-    height: calc(100% - 60px);
+    flex: 1;
+    min-height: 0;
 }
 
 /* Monaco editor tweaks */
@@ -1067,16 +1152,6 @@ body {
 
 .monaco-editor .lines-content {
     border: none !important;
-}
-
-.sidebar-actions {
-    display: flex;
-    gap: 6px;
-}
-.sidebar-actions .mini {
-    padding: 4px 8px;
-    font-size: 11px;
-    box-shadow: none;
 }
 
 .section {
@@ -1306,12 +1381,21 @@ body {
 }
 
 /* Output Panel */
+/* Tabs, the active panel, then the command bar pinned to the bottom */
 .output-panel {
     background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
     border: 2px solid var(--border-light);
     border-radius: var(--radius);
     box-shadow: var(--shadow);
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.output-panel .cmdbar {
+    padding: 8px 12px;
+    min-height: 0;
 }
 
 .panel-tabs {
@@ -1319,6 +1403,7 @@ body {
     grid-template-columns: repeat(5, 1fr);
     background: var(--accent-mint);
     border-bottom: 1px solid var(--border-light);
+    flex-shrink: 0;
 }
 
 .tab-btn {
@@ -1352,7 +1437,8 @@ body {
 }
 
 .panel-content {
-    height: calc(100% - 70px);
+    flex: 1;
+    min-height: 0;
     position: relative;
 }
 
@@ -1988,6 +2074,43 @@ button:active {
     box-shadow: 0 4px 20px rgba(255, 249, 196, 0.4);
 }
 
+/* Every quickbar group uses the same row: inputs and buttons share one metric */
+.quickbar .quickbar-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.quickbar .quickbar-row input {
+    width: 120px;
+    height: 32px;
+    padding: 0 10px;
+    font-family: "Fira Code", Menlo, "SF Mono", "Roboto Mono", Consolas, monospace;
+    font-size: 12px;
+    border: 1px solid var(--border-light);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    box-shadow: none;
+}
+
+.quickbar .quickbar-row input.narrow {
+    width: 70px;
+}
+
+.quickbar .quickbar-row button {
+    height: 32px;
+    padding: 0 12px;
+    font-size: 12px;
+}
+
+.quickbar .quickbar-row :disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: none;
+    transform: none;
+}
+
 /* Debug Buttons - CPUlator Style */
 .debug-btn {
     padding: 6px 12px !important;
@@ -2012,14 +2135,6 @@ button:active {
     background: linear-gradient(135deg, var(--accent-coral) 0%, #ffb3b3 100%) !important;
     border-color: #ff9999 !important;
     color: #663333 !important;
-}
-
-/* Memory Format Selector */
-#memFormat {
-    width: 80px;
-    margin: 0 4px;
-    padding: 6px 8px;
-    font-size: 11px;
 }
 
 /* Input Styling */
@@ -2047,14 +2162,19 @@ input::placeholder {
 }
 
 /* File Label */
+/* Sized to match the toolbar buttons on either side of it. The filename keeps a
+   monospace face so it still reads as a file rather than a control. */
 #asmLabel {
+    display: inline-flex;
+    align-items: center;
     color: var(--text-secondary);
     background: linear-gradient(135deg, var(--accent-peach) 0%, #ffe6d9 100%);
-    padding: 8px 16px;
+    padding: 6px 12px;
     border-radius: var(--radius);
     border: 2px solid #ffd1bf;
     font-family: "Fira Code", Menlo, "SF Mono", "Roboto Mono", Consolas, monospace;
     font-size: 12px;
+    font-weight: 500;
     min-width: 0;
     white-space: normal;
     overflow-wrap: anywhere;
@@ -2069,43 +2189,20 @@ input::placeholder {
 }
 
 #send {
-    background: linear-gradient(135deg, var(--accent-pink) 0%, #ffb3d9 100%);
-    border-color: #ff99cc;
-    color: #663347;
+    background: linear-gradient(135deg, var(--accent-lavender) 0%, var(--accent-purple) 100%);
+    border-color: #b18aeb;
+    color: #4a2f7c;
     font-weight: 600;
 }
 
 #send:hover {
-    border-color: #ff80bf;
-    box-shadow: 0 6px 25px rgba(255, 192, 217, 0.4);
+    border-color: #9d70e3;
+    box-shadow: 0 6px 25px rgba(177, 138, 235, 0.4);
 }
 
-/* Memory and Breakpoint Controls */
-#memAddr,
-#memLen,
-#bpLine {
-    width: 80px;
-    font-family: "Fira Code", Menlo, "SF Mono", "Roboto Mono", Consolas, monospace;
-    font-size: 12px;
-}
-
-input#memAddr {
-    width: fit-content;
-}
-
-input#gotoAddress {
-    width: 100px;
-}
-
-#memBtn,
-#bpSet,
-#gotoBtn {
-    background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%);
-    font-family: "Fira Code", Menlo, "SF Mono", "Roboto Mono", Consolas, monospace;
-    font-size: 11px;
-    padding: 8px 12px;
-}
-
+/* Memory and Breakpoint Controls
+   Sizing comes from .quickbar-row so all three groups line up; only the
+   role colors below are per-button. */
 #bpSet {
     background: linear-gradient(135deg, var(--accent-mint) 0%, #b8f2d9 100%);
     border-color: #a8e6cc;
@@ -2335,23 +2432,23 @@ input#gotoAddress {
 /* Responsive Design */
 @media (max-width: 1400px) {
     .main-layout {
-        grid-template-columns: 220px 1fr 1fr;
+        grid-template-columns: 180px 1.15fr 1.3fr;
         gap: 10px;
     }
 }
 
 @media (max-width: 1200px) {
     .main-layout {
-        grid-template-columns: 200px 1fr 1fr;
+        grid-template-columns: 170px 1.15fr 1.3fr;
         gap: 8px;
     }
 }
 
 @media (max-width: 1024px) {
     .main-layout {
-        grid-template-columns: 180px 1fr 1fr;
+        grid-template-columns: 160px 1.15fr 1.3fr;
         gap: 8px;
-        margin: 0 12px;
+        margin: 0 12px 10px;
     }
 
     .quickbar {
@@ -2375,7 +2472,7 @@ input#gotoAddress {
     .main-layout {
         grid-template-columns: 1fr;
         grid-template-rows: minmax(150px, 1fr) minmax(300px, 2fr) minmax(300px, 2fr);
-        margin: 0 8px;
+        margin: 0 8px 8px;
         gap: 6px;
     }
 
@@ -2413,7 +2510,7 @@ input#gotoAddress {
 
 @media (max-width: 480px) {
     .main-layout {
-        margin: 0 4px;
+        margin: 0 4px 6px;
         gap: 4px;
     }
 
@@ -2443,7 +2540,7 @@ input#gotoAddress {
 /* Ultra-wide screens */
 @media (min-width: 1800px) {
     .main-layout {
-        grid-template-columns: 300px 1fr 1fr;
+        grid-template-columns: 230px 1.15fr 1.3fr;
         gap: 16px;
         margin: 0 24px;
     }
@@ -2949,14 +3046,14 @@ select:focus {
 }
 
 #reload {
-    background: linear-gradient(135deg, var(--accent-purple) 0%, #ba68c8 100%);
-    border-color: #ab47bc;
-    color: #4a148c;
+    background: linear-gradient(135deg, var(--accent-mint) 0%, #b8f2d9 100%);
+    border-color: #a8e6cc;
+    color: #2d5a3d;
 }
 
 #reload:hover {
-    border-color: #8e24aa;
-    box-shadow: 0 6px 25px rgba(186, 104, 200, 0.4);
+    border-color: #7fd4b0;
+    box-shadow: 0 6px 25px rgba(168, 230, 204, 0.45);
 }
 
 /* Symbol Table Panel */
@@ -3273,23 +3370,3 @@ select:focus {
     background: var(--accent-skyblue);
 }
 
-label#displayFormat {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
-select#numberFormat {
-    margin-right: 10px;
-    background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%);
-    font-family: "Fira Code", Menlo, "SF Mono", "Roboto Mono", Consolas, monospace;
-    font-size: 11px;
-    padding: 8px 12px;
-    border: 2px solid var(--border-light);
-    border-radius: var(--radius);
-    font-weight: 600;
-    cursor: pointer;
-    box-shadow: var(--shadow);
-}

@@ -330,13 +330,29 @@ app.on("before-quit", () => {
 
 ipcMain.handle("pick-asm", async () => {
     const res = await dialog.showOpenDialog(win, {
-        title: "Pick RISC-V assembly (.s)",
-        properties: ["openFile"],
-        filters: [{ name: "Assembly", extensions: ["s"] }],
+        title: "Open assembly or C source",
+        // Single file only - bundles/packages stay navigable rather than selectable.
+        properties: ["openFile", "treatPackageAsDirectory"],
+        filters: [
+            { name: "Assembly / C", extensions: ["s", "S", "asm", "c", "h"] },
+            { name: "Assembly", extensions: ["s", "S", "asm"] },
+            { name: "C", extensions: ["c", "h"] },
+        ],
     });
     if (res.canceled || res.filePaths.length === 0) return null;
-    registerAllowedRoot(path.dirname(res.filePaths[0]));
-    return res.filePaths[0];
+
+    const picked = res.filePaths[0];
+    try {
+        if ((await stat(picked)).isDirectory()) {
+            return null;
+        }
+    } catch (e) {
+        console.error("Failed to inspect picked path:", e);
+        return null;
+    }
+
+    registerAllowedRoot(path.dirname(picked));
+    return picked;
 });
 
 ipcMain.handle("build-emu", async () => {
@@ -598,10 +614,14 @@ ipcMain.handle("save-file", async (_evt, filePath, content) => {
 
 ipcMain.handle("new-file", async (_evt, defaultName = "untitled.s", content = "") => {
     const res = await dialog.showSaveDialog(win, {
-        title: "Create new RISC-V assembly (.s)",
+        title: "Create new assembly or C source",
         defaultPath: defaultName,
         buttonLabel: "Create",
-        filters: [{ name: "Assembly", extensions: ["s"] }],
+        filters: [
+            { name: "Assembly / C", extensions: ["s", "S", "asm", "c", "h"] },
+            { name: "Assembly", extensions: ["s", "S", "asm"] },
+            { name: "C", extensions: ["c", "h"] },
+        ],
         properties: [],
     });
     if (res.canceled || !res.filePath) return null;
