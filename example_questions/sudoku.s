@@ -42,15 +42,94 @@ loop_answers:
 	bnez s0 loop_answers
 	hcf
 
-#########################################
-####### Modify this part! #############>>
 
 solve:
-	addi sp sp -4
-	sw ra 0(sp)
-	
-	lw ra 0(sp)
-	addi sp sp 4
+solve_pass:
+	li t0 0          # cell index
+	li t6 0          # whether this pass filled a cell
+
+solve_cell:
+	li a1 16
+	bge t0 a1 solve_pass_done
+
+	add t1 a0 t0
+	lbu a2 0(t1)
+	bnez a2 solve_next_cell
+
+	# Candidate bits for values 1..4: 0b11110
+	li t2 30
+
+	# Exclude values already present in this cell's row.
+	andi t3 t0 -4
+	li t4 0
+
+solve_row_loop:
+	li a1 4
+	bge t4 a1 solve_column_start
+
+	add a1 t3 t4
+	add a1 a0 a1
+	lbu a2 0(a1)
+	beq a2 zero solve_row_next
+
+	li a3 1
+	sll a3 a3 a2
+	xori a3 a3 -1
+	and t2 t2 a3
+
+solve_row_next:
+	addi t4 t4 1
+	j solve_row_loop
+
+	# Exclude values already present in this cell's column.
+solve_column_start:
+	andi t3 t0 3
+	li t4 0
+
+solve_column_loop:
+	li a1 4
+	bge t4 a1 solve_choose_value
+
+	slli a1 t4 2
+	add a1 a1 t3
+	add a1 a0 a1
+	lbu a2 0(a1)
+	beq a2 zero solve_column_next
+
+	li a3 1
+	sll a3 a3 a2
+	xori a3 a3 -1
+	and t2 t2 a3
+
+solve_column_next:
+	addi t4 t4 1
+	j solve_column_loop
+
+	# Fill the cell only when exactly one candidate remains.
+solve_choose_value:
+	addi a1 t2 -1
+	and a1 a1 t2
+	bnez a1 solve_next_cell
+
+	li t4 0
+
+solve_bit_to_value:
+	li a1 1
+	beq t2 a1 solve_store_value
+	srli t2 t2 1
+	addi t4 t4 1
+	j solve_bit_to_value
+
+solve_store_value:
+	sb t4 0(t1)
+	li t6 1
+
+solve_next_cell:
+	addi t0 t0 1
+	j solve_cell
+
+solve_pass_done:
+	bnez t6 solve_pass
 	ret
 
 ### Do not modify beyond this point! ##<<

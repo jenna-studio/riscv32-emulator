@@ -3,7 +3,7 @@
 	li sp  0x10000
 main:
 .LFB0:
-	addi	sp sp -16  
+	addi	sp sp -16
 .LCFI0:
 	sw	ra 12(sp)
 	sw	s0 8(sp)
@@ -570,3 +570,4 @@ _Z9calc_disti:
 	jr	ra
 .LFE3:
 	.data
+	

@@ -35,14 +35,36 @@ submit:
 	sw a0 0(t0)
 	ret
 
-#########################################
-####### Modify this part! #############>>
 
 solve:
-	li t0 0xdeadbeef
-	sw t0 0(sp)
-	#addi a0 zero 1
-	#jal submit
+	addi sp sp -4
+	sw ra 0(sp)
+
+	li t0 0          # index
+	li t1 0          # sum
+
+loop:
+	bge t0 a0 done
+
+	add t2 a1 t0
+	lb t3 0(t2)      # signed input value
+
+	add t2 a2 t0
+	lbu t4 0(t2)     # mask value
+	beq t4 zero skip
+
+	add t1 t1 t3
+
+skip:
+	addi t0 t0 1
+	j loop
+
+done:
+	mv a0 t1
+	jal submit
+
+	lw ra 0(sp)
+	addi sp sp 4
 	ret
 
 ### Do not modify beyond this point! ##<<

@@ -1870,9 +1870,6 @@ function setupButtonHandlers() {
                     monacoEditor.deltaDecorations(window.currentLineDecorations, []);
                     window.currentLineDecorations = [];
                 }
-
-                // Clear terminal output
-                terminal.writeln("✅ Emulator stopped");
             } else {
                 showNotification(`Failed to stop: ${result.error || "Unknown error"}`, "error");
                 // Even if stop "failed", assume emulator is stopped for UI consistency
@@ -2172,6 +2169,12 @@ function setupButtonHandlers() {
 
 // Central synchronization function to update all panels
 async function syncAllPanels(reason = "update") {
+    // Every background query re-enters the emulator's debug loop, which reprints the
+    // "[inst: ..., pc: ..., src: ...]" banner before each prompt. Keep those echoes out
+    // of the terminal so the user only sees the banner for the command they ran.
+    const previousSuppression = suppressTerminalOutput;
+    suppressTerminalOutput = true;
+
     try {
         console.log(`🔄 Syncing all panels (${reason})...`);
 
@@ -2306,6 +2309,8 @@ async function syncAllPanels(reason = "update") {
     } catch (error) {
         console.error("Error syncing panels:", error);
         showNotification("Error syncing panels", "error");
+    } finally {
+        suppressTerminalOutput = previousSuppression;
     }
 }
 

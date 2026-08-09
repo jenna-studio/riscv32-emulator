@@ -65,7 +65,7 @@ body {
 }
 
 .toolbar .spacer {
-    flex: 1;
+    flex: 1 0 24px;
 }
 
 .toolbar-controls {
@@ -2055,10 +2055,10 @@ input::placeholder {
     border: 2px solid #ffd1bf;
     font-family: "Fira Code", Menlo, "SF Mono", "Roboto Mono", Consolas, monospace;
     font-size: 12px;
-    max-width: 300px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
     box-shadow: var(--shadow);
 }
 
