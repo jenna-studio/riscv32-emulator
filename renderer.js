@@ -10,6 +10,11 @@ let currentFiles = {
     assembly: null,
     c: null,
 };
+// On-disk path backing each view; Save must write to the active view's file.
+let filePaths = {
+    assembly: null,
+    c: null,
+};
 let breakpoints = new Set();
 let monacoEditor = null;
 let monacoModels = {
@@ -44,15 +49,8 @@ let performanceCounters = {
 };
 let stepExecutionInProgress = false;
 
-const fileMapping = {
-    "graph.s": { assembly: "./example_questions/graph.s", c: "./example_questions/graph.c" },
-    "reduction.s": {
-        assembly: "./example_questions/reduction.s",
-        c: "./example_questions/reduction.c",
-    },
-    "sort.s": { assembly: "./example_questions/sort.s", c: "./example_questions/sort.c" },
-    "sudoku.s": { assembly: "./example_questions/sudoku.s", c: "./example_questions/sudoku.c" },
-};
+// Populated from the examples/ folder on startup by loadExampleFiles().
+const fileMapping = {};
 
 const RISCV_EXECUTABLE_MNEMONICS = new Set([
     // Arithmetic
@@ -114,6 +112,8 @@ const RISCV_EXECUTABLE_MNEMONICS = new Set([
     "nop",
 ]);
 
+const TERMINAL_MAX_LINES = 5000;
+
 let commandQueue = Promise.resolve();
 
 function enqueueEmulatorCommand(command) {
@@ -126,6 +126,11 @@ function enqueueEmulatorCommand(command) {
             if (result.timedOut) {
                 console.warn(`Command \"${command}\" timed out waiting for prompt`);
             }
+            // Single parse point: main.js streams chunks for terminal rendering only,
+            // the command reply is the one channel that drives panel state.
+            if (result.output) {
+                parseEmulatorOutputForTrace(result.output);
+            }
             return result;
         } catch (error) {
             console.error(`Command \"${command}\" failed:`, error);
@@ -137,22 +142,90 @@ function enqueueEmulatorCommand(command) {
     return commandQueue;
 }
 
+// The emulator prints every register value as unprefixed hex ("%08x" / "%x").
+// Base 10 is only correct for the prompt banner's inst/pc/src fields.
 function normalizeRegisterValue(rawValue) {
     if (rawValue === null || rawValue === undefined) return "0";
-    const text = String(rawValue).trim();
+    let text = String(rawValue).trim();
     if (!text) return "0";
 
-    const isHex = /^-?0x[0-9a-fA-F]+$/.test(text);
-    const numeric = Number.parseInt(text, isHex ? 16 : 10);
-    if (!Number.isNaN(numeric)) {
-        return (numeric >>> 0).toString(16);
+    let negative = false;
+    if (text.startsWith("-")) {
+        negative = true;
+        text = text.slice(1);
+    } else if (text.startsWith("+")) {
+        text = text.slice(1);
+    }
+    text = text.replace(/^0x/i, "");
+
+    const parsed = Number.parseInt(text, 16);
+    if (Number.isNaN(parsed)) return "0";
+    return ((negative ? -parsed : parsed) >>> 0).toString(16);
+}
+
+const REGISTER_ALIAS_INDEX = {
+    zero: 0,
+    ra: 1,
+    sp: 2,
+    gp: 3,
+    tp: 4,
+    t0: 5,
+    t1: 6,
+    t2: 7,
+    s0: 8,
+    fp: 8,
+    s1: 9,
+    a0: 10,
+    a1: 11,
+    a2: 12,
+    a3: 13,
+    a4: 14,
+    a5: 15,
+    a6: 16,
+    a7: 17,
+    s2: 18,
+    s3: 19,
+    s4: 20,
+    s5: 21,
+    s6: 22,
+    s7: 23,
+    s8: 24,
+    s9: 25,
+    s10: 26,
+    s11: 27,
+    t3: 28,
+    t4: 29,
+    t5: 30,
+    t6: 31,
+};
+
+// The emulator emits zero-padded "x00".."x09"; the panels look registers up
+// unpadded. Everything stored in currentRegisterValues/previousRegisterValues
+// uses the unpadded "x0".."x31" form (plus "pc").
+function canonicalRegisterKey(name) {
+    if (!name) return null;
+    const key = String(name).trim().toLowerCase();
+    if (key === "pc") return "pc";
+
+    const xMatch = key.match(/^x(\d+)$/);
+    if (xMatch) {
+        const index = Number.parseInt(xMatch[1], 10);
+        return index >= 0 && index <= 31 ? `x${index}` : null;
     }
 
-    const sanitized = text.replace(/[^0-9a-fA-F]/g, "");
-    if (!sanitized) return "0";
-    const parsed = Number.parseInt(sanitized, 16);
-    if (Number.isNaN(parsed)) return "0";
-    return (parsed >>> 0).toString(16);
+    if (Object.prototype.hasOwnProperty.call(REGISTER_ALIAS_INDEX, key)) {
+        return `x${REGISTER_ALIAS_INDEX[key]}`;
+    }
+
+    return null;
+}
+
+function getRegisterValue(source, regNumberOrName) {
+    const key = canonicalRegisterKey(
+        typeof regNumberOrName === "number" ? `x${regNumberOrName}` : regNumberOrName
+    );
+    if (!key || !source) return undefined;
+    return source[key];
 }
 
 function ingestRegisterDump(registerOutput) {
@@ -160,26 +233,40 @@ function ingestRegisterDump(registerOutput) {
 
     console.log("🔍 Ingesting register dump, output length:", registerOutput.length);
 
-    const regRegex = /(x(?:[0-2]?\d|3[01])|pc)\s*[:=]\s*([-+]?0x[0-9a-fA-F]+|[-+]?\d+)/gi;
+    const regRegex = /\b(x(?:[0-2]?\d|3[01])|pc)\s*[:=]\s*(0x[0-9a-fA-F]+|[0-9a-fA-F]+)/gi;
     let match;
     let capturedPc = null;
     let registerCount = 0;
 
     while ((match = regRegex.exec(registerOutput))) {
-        const name = match[1].toLowerCase();
+        const key = canonicalRegisterKey(match[1]);
+        if (!key) continue;
+
         const normalized = normalizeRegisterValue(match[2]);
         registerCount++;
 
-        if (name === "pc") {
+        currentRegisterValues[key] = normalized;
+        if (key === "pc") {
             capturedPc = normalized;
-            currentRegisterValues["pc"] = normalized;
-        } else {
-            currentRegisterValues[name] = normalized;
         }
     }
 
     console.log(`✅ Ingested ${registerCount} registers, PC:`, capturedPc);
     return { pc: capturedPc };
+}
+
+// Canonical prompt banner emitted by every emulator status/halt path.
+const STATUS_LINE_REGEX = /\[inst:\s*(\d+),\s*pc:\s*(\d+),\s*src:\s*(\d+)\]/;
+
+// Every address the emulator prints is 8-digit zero-padded hex; normalize both
+// sides of a comparison before matching.
+function normalizeAddressHex(value) {
+    if (value === null || value === undefined) return "";
+    const text = String(value).trim().replace(/^0x/i, "");
+    if (!text) return "";
+    const parsed = Number.parseInt(text, 16);
+    if (Number.isNaN(parsed)) return "";
+    return (parsed >>> 0).toString(16).padStart(8, "0");
 }
 
 function showNotification(message, type = "info") {
@@ -214,10 +301,8 @@ function updateButtonStates() {
         if (label === "Debug Control") {
             controls.forEach((control) => {
                 const cmd = control.getAttribute("data-cmd");
-                if (cmd === "s") {
+                if (cmd === "restart") {
                     control.disabled = !fileLoaded;
-                } else if (cmd === "q") {
-                    control.disabled = !emulatorRunning;
                 } else {
                     control.disabled = !emulatorRunning;
                 }
@@ -229,6 +314,8 @@ function updateButtonStates() {
         if (["View", "Memory"].includes(label)) {
             disable = !emulatorRunning;
         } else if (["Breakpoints", "Navigation"].includes(label)) {
+            // Breakpoints can be staged before the emulator starts; toggleBreakpoint
+            // forwards them to a running emulator and syncBreakpoints replays them.
             disable = !fileLoaded;
         }
         controls.forEach((c) => (c.disabled = disable));
@@ -256,14 +343,6 @@ function initTerminal() {
     terminalContainer.appendChild(log);
 
     let lineBuffer = "";
-
-    const escapeHtml = (value) =>
-        value
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&#39;");
 
     const classifyLine = (line) => {
         const trimmed = line.trim();
@@ -318,12 +397,6 @@ function initTerminal() {
                 break;
         }
 
-        // Highlight file references (file.ext:line:column or file.ext:line)
-        enhanced = enhanced.replace(
-            /(\w+\.\w+):(\d+)(?::(\d+))?/g,
-            '<span class="file-ref">📁 $1</span>:<span class="line-ref">$2</span>$3'
-        );
-
         return enhanced;
     };
 
@@ -346,6 +419,41 @@ function initTerminal() {
 
         if (lastIndex < text.length) {
             element.appendChild(document.createTextNode(text.slice(lastIndex)));
+        }
+    };
+
+    // Highlight file references (file.ext:line[:column]) as DOM nodes.
+    const appendEnhancedContent = (element, text) => {
+        const fileRefRegex = /(\w+\.\w+):(\d+)(?::(\d+))?/g;
+        let lastIndex = 0;
+        let match;
+
+        while ((match = fileRefRegex.exec(text))) {
+            if (match.index > lastIndex) {
+                appendTokenizedContent(element, text.slice(lastIndex, match.index));
+            }
+
+            const fileSpan = document.createElement("span");
+            fileSpan.className = "file-ref";
+            fileSpan.textContent = `📁 ${match[1]}`;
+            element.appendChild(fileSpan);
+
+            element.appendChild(document.createTextNode(":"));
+
+            const lineSpan = document.createElement("span");
+            lineSpan.className = "line-ref";
+            lineSpan.textContent = match[2];
+            element.appendChild(lineSpan);
+
+            if (match[3]) {
+                element.appendChild(document.createTextNode(`:${match[3]}`));
+            }
+
+            lastIndex = match.index + match[0].length;
+        }
+
+        if (lastIndex < text.length) {
+            appendTokenizedContent(element, text.slice(lastIndex));
         }
     };
 
@@ -376,21 +484,11 @@ function initTerminal() {
                 line.appendChild(cmdSpan);
             }
         } else if (content.trim().length === 0) {
-            line.innerHTML = "&nbsp;";
+            line.appendChild(document.createTextNode("\u00a0"));
         } else {
-            // Enhance error messages with emojis and formatting
-            const enhancedContent = enhanceErrorMessage(content, severity);
-
-            if (enhancedContent.includes("<span")) {
-                // Content has HTML formatting, use innerHTML
-                line.innerHTML = enhancedContent;
-            } else {
-                // Safe text content, use tokenized approach
-                const sanitized = escapeHtml(enhancedContent);
-                const temp = document.createElement("div");
-                temp.innerHTML = sanitized;
-                appendTokenizedContent(line, temp.textContent || "");
-            }
+            // Emulator output is untrusted (it echoes .s file contents), so markup is
+            // only ever built from DOM nodes - never by string-concatenating into HTML.
+            appendEnhancedContent(line, enhanceErrorMessage(content, severity));
         }
 
         return line;
@@ -405,6 +503,11 @@ function initTerminal() {
             const lineElement = renderLine(segment);
             log.appendChild(lineElement);
         });
+
+        // Bound the terminal DOM; an unattended "c" can emit tens of thousands of lines.
+        while (log.childElementCount > TERMINAL_MAX_LINES) {
+            log.removeChild(log.firstChild);
+        }
 
         log.scrollTop = log.scrollHeight;
     };
@@ -481,10 +584,7 @@ function initTerminal() {
                     commandHistory.push(command);
                     historyIndex = commandHistory.length;
 
-                    // Display command in terminal
-                    terminal.writeln(`>> ${command}`);
-
-                    // Execute command
+                    // sendCommand echoes the command itself
                     await sendCommand(command);
 
                     // Clear input
@@ -573,15 +673,52 @@ function updateBreakpointDecorations() {
     breakpointDecorations = monacoEditor.deltaDecorations(breakpointDecorations, decorations);
 }
 
-function toggleBreakpoint(lineNumber) {
+// Breakpoint state has to reach a running emulator ("b<n>" sets, "B<n>" deletes),
+// otherwise the glyph is decorative and execution runs straight past it.
+async function setBreakpoint(lineNumber) {
     if (breakpoints.has(lineNumber)) {
-        breakpoints.delete(lineNumber);
-        showNotification(`Breakpoint removed at line ${lineNumber}`, "info");
-    } else {
-        breakpoints.add(lineNumber);
-        showNotification(`Breakpoint set at line ${lineNumber}`, "info");
+        showNotification(`Breakpoint already set at line ${lineNumber}`, "info");
+        return;
     }
+
+    breakpoints.add(lineNumber);
     updateBreakpointDecorations();
+
+    if (ideState.emulatorRunning) {
+        const result = await enqueueEmulatorCommand(`b${lineNumber}`);
+        if (!result.ok || /No executable instruction found/.test(result.output || "")) {
+            breakpoints.delete(lineNumber);
+            updateBreakpointDecorations();
+            showNotification(`No executable instruction at line ${lineNumber}`, "error");
+            return;
+        }
+    }
+
+    showNotification(`Breakpoint set at line ${lineNumber}`, "info");
+}
+
+async function removeBreakpoint(lineNumber) {
+    if (!breakpoints.has(lineNumber)) {
+        showNotification(`No breakpoint at line ${lineNumber}`, "info");
+        return;
+    }
+
+    breakpoints.delete(lineNumber);
+    updateBreakpointDecorations();
+
+    if (ideState.emulatorRunning) {
+        await enqueueEmulatorCommand(`B${lineNumber}`);
+    }
+
+    showNotification(`Breakpoint removed at line ${lineNumber}`, "info");
+}
+
+async function toggleBreakpoint(lineNumber) {
+    if (breakpoints.has(lineNumber)) {
+        await removeBreakpoint(lineNumber);
+    } else {
+        await setBreakpoint(lineNumber);
+    }
 }
 
 function setEditorView(mode) {
@@ -1054,7 +1191,9 @@ async function initEditor() {
         if (event.target.type === monacoRef.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
             const lineNumber = event.target.position?.lineNumber;
             if (lineNumber) {
-                toggleBreakpoint(lineNumber);
+                toggleBreakpoint(lineNumber).catch((error) =>
+                    console.error("Breakpoint toggle failed:", error)
+                );
                 event.event.preventDefault();
             }
         }
@@ -1089,54 +1228,94 @@ function toggleFileView() {
     }
 }
 
+// Returns false when the user chooses to keep their unsaved edits.
+function confirmDiscardUnsavedEdits(action = "load another file") {
+    if (!ideState.editorDirty) return true;
+    return window.confirm(`You have unsaved changes. Discard them and ${action}?`);
+}
+
+function fileNameFromPath(filePath) {
+    if (!filePath) return "";
+    const parts = String(filePath).split(/[\\/]/);
+    return parts[parts.length - 1] || "";
+}
+
+// Conservative generalization of the hardcoded dual-view table: a ".s" file gets a
+// C view when a sibling ".c" exists, which is the same condition that gates
+// cFileAvailable for the shipped examples.
+async function readSiblingCFile(filePath) {
+    if (!filePath || !filePath.toLowerCase().endsWith(".s")) return null;
+    const candidate = filePath.slice(0, -2) + ".c";
+    try {
+        return await window.api.readFile(candidate);
+    } catch {
+        return null;
+    }
+}
+
 async function loadFile(filePath) {
     console.log(`🔄 Loading file: ${filePath}`);
+
+    const fileName = fileNameFromPath(filePath);
+    if (fileMapping[fileName]) {
+        await loadFilePair(fileName);
+        return;
+    }
+
+    if (!confirmDiscardUnsavedEdits()) return;
+
     try {
         const content = await window.api.readFile(filePath);
-        const fileName = filePath.split("/").pop();
 
-        if (fileMapping[fileName]) {
-            await loadFilePair(fileName);
-        } else {
-            if (monacoEditor) {
-                asmPath = filePath;
-                document.getElementById("asmLabel").textContent = fileName;
+        if (!monacoEditor) return;
 
-                const editorTitle = document.getElementById("editorTitle");
+        const editorTitle = document.getElementById("editorTitle");
 
-                // Reset emulator state for clean file switching
-                await resetEmulatorState();
+        // Reset emulator state for clean file switching
+        await resetEmulatorState();
 
-                // Set the asmPath for the new file
-                asmPath = filePath;
+        document.getElementById("asmLabel").textContent = fileName;
 
-                if (fileName.endsWith(".s")) {
-                    setModelContent("assembly", content, true);
-                    setModelContent("c", "");
-                    setEditorView("assembly");
-                    editorTitle.textContent = "Assembly Editor";
-                    document.getElementById("toggleView").innerHTML =
-                        '<i class="fas fa-exchange-alt"></i> Switch to C';
-                    breakpoints.clear();
-                    updateBreakpointDecorations();
-                } else if (fileName.endsWith(".c")) {
-                    setModelContent("c", content, true);
-                    setModelContent("assembly", "");
-                    setEditorView("c");
-                    editorTitle.textContent = "C Editor";
-                    document.getElementById("toggleView").innerHTML =
-                        '<i class="fas fa-exchange-alt"></i> Switch to Assembly';
-                    breakpoints.clear();
-                    updateBreakpointDecorations();
-                }
+        let hasCView = false;
 
-                ideState.fileLoaded = true;
-                ideState.editorDirty = false;
-                ideState.cFileAvailable = false;
-                updateButtonStates();
-                showNotification(`Loaded: ${fileName}`, "success");
+        if (fileName.toLowerCase().endsWith(".s")) {
+            asmPath = filePath;
+            filePaths.assembly = filePath;
+            filePaths.c = null;
+
+            const cContent = await readSiblingCFile(filePath);
+            hasCView = cContent !== null;
+            if (hasCView) {
+                filePaths.c = filePath.slice(0, -2) + ".c";
             }
+
+            setModelContent("assembly", content, true);
+            setModelContent("c", cContent ?? "", true);
+            setEditorView("assembly");
+            editorTitle.textContent = "Assembly Editor";
+            document.getElementById("toggleView").innerHTML =
+                '<i class="fas fa-exchange-alt"></i> Switch to C';
+        } else if (fileName.toLowerCase().endsWith(".c")) {
+            asmPath = null;
+            filePaths.assembly = null;
+            filePaths.c = filePath;
+
+            setModelContent("c", content, true);
+            setModelContent("assembly", "");
+            setEditorView("c");
+            editorTitle.textContent = "C Editor";
+            document.getElementById("toggleView").innerHTML =
+                '<i class="fas fa-exchange-alt"></i> Switch to Assembly';
         }
+
+        breakpoints.clear();
+        updateBreakpointDecorations();
+
+        ideState.fileLoaded = true;
+        ideState.editorDirty = false;
+        ideState.cFileAvailable = hasCView;
+        updateButtonStates();
+        showNotification(`Loaded: ${fileName}`, "success");
     } catch (error) {
         showNotification(`Failed to load file: ${error.message}`, "error");
     }
@@ -1144,16 +1323,21 @@ async function loadFile(filePath) {
 
 async function saveFile() {
     if (document.getElementById("saveFile").disabled) return;
-    if (!currentEditor || !asmPath) {
-        showNotification("No file to save", "error");
+
+    // Save to the file backing the view currently on screen - writing the C model
+    // into the .s path destroys the assembly source.
+    const targetPath = filePaths[currentViewMode];
+    if (!currentEditor || !targetPath) {
+        showNotification(`No ${currentViewMode === "c" ? "C" : "assembly"} file to save`, "error");
         return;
     }
+
     try {
         const content = currentEditor.getValue();
-        await window.api.saveFile(asmPath, content);
+        await window.api.saveFile(targetPath, content);
         ideState.editorDirty = false;
         updateButtonStates();
-        showNotification(`Saved: ${asmPath ? asmPath.split("/").pop() : "file"}`, "success");
+        showNotification(`Saved: ${fileNameFromPath(targetPath)}`, "success");
     } catch (error) {
         showNotification(`Failed to save file: ${error.message}`, "error");
     }
@@ -1165,14 +1349,18 @@ async function loadFilePair(fileName) {
 
     const editorTitle = document.getElementById("editorTitle");
 
+    if (!confirmDiscardUnsavedEdits()) return;
+
     try {
         const assemblyContent = await window.api.readFile(mapping.assembly);
-        const cContent = await window.api.readFile(mapping.c);
+        const cContent = mapping.c ? await window.api.readFile(mapping.c) : "";
 
         // Reset emulator state for clean file switching
         await resetEmulatorState();
 
         asmPath = mapping.assembly;
+        filePaths.assembly = mapping.assembly;
+        filePaths.c = mapping.c;
         document.getElementById("asmLabel").textContent = fileName;
 
         if (monacoEditor) {
@@ -1188,9 +1376,12 @@ async function loadFilePair(fileName) {
 
         ideState.fileLoaded = true;
         ideState.editorDirty = false;
-        ideState.cFileAvailable = true;
+        ideState.cFileAvailable = Boolean(mapping.c);
         updateButtonStates();
-        showNotification(`Loaded: ${fileName} with C source`, "success");
+        showNotification(
+            mapping.c ? `Loaded: ${fileName} with C source` : `Loaded: ${fileName}`,
+            "success",
+        );
     } catch (error) {
         showNotification(`Failed to load file pair: ${error.message}`, "error");
         ideState.cFileAvailable = false;
@@ -1204,16 +1395,38 @@ async function loadExampleFiles() {
 
     examplesList.innerHTML = "";
 
-    // Always load hardcoded examples
-    Object.keys(fileMapping).forEach((fileName) => {
+    // Rebuild the mapping from whatever currently lives in examples/
+    Object.keys(fileMapping).forEach((key) => delete fileMapping[key]);
+
+    let examples = [];
+    try {
+        examples = (await window.api.listExamples()) || [];
+    } catch (error) {
+        console.error("Failed to list examples:", error);
+    }
+
+    if (examples.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "file-item";
+        empty.style.opacity = "0.6";
+        empty.textContent = "No examples found";
+        examplesList.appendChild(empty);
+        console.log("⚠️ No example files found in examples/");
+        return;
+    }
+
+    examples.forEach(({ name, assembly, c }) => {
+        fileMapping[name] = { assembly, c };
+
         const item = document.createElement("div");
         item.className = "file-item";
-        item.innerHTML = `<i class="fas fa-file-code"></i> ${fileName}`;
+        item.innerHTML = `<i class="fas fa-file-code"></i> ${name}`;
         item.style.cursor = "pointer";
-        item.addEventListener("click", () => loadFilePair(fileName));
+        item.title = c ? `${name} (+ C source)` : name;
+        item.addEventListener("click", () => loadFilePair(name));
         examplesList.appendChild(item);
     });
-    console.log("✅ Example files loaded");
+    console.log(`✅ Example files loaded (${examples.length})`);
 
     // Load workspace files if workspace is set
     if (currentWorkspaceFolder) {
@@ -1328,9 +1541,7 @@ function formatNumberByDisplayOption(value) {
         case "dec":
             return num.toString(10);
         case "bin":
-            // Show only lower 16 bits for better display in registers panel
-            const lower16 = num & 0xffff;
-            return "0b" + lower16.toString(2).padStart(16, "0");
+            return "0b" + num.toString(2).padStart(32, "0");
         case "oct":
             return "0o" + num.toString(8);
         case "hex":
@@ -1391,27 +1602,16 @@ async function sendCommand(command) {
         if (result.ok) {
             terminal.writeln(`>> ${command}`);
 
-            // CPUlator-style command processing - sync all panels for execution commands
+            // "r" is a register dump, not an execution command.
             const isStepCommand = /^s\d*$/i.test(commandToSend);
-            if (commandToSend === "c" || commandToSend === "r" || isStepCommand) {
-                // Use the comprehensive sync function for all execution commands
+            if (commandToSend === "c" || isStepCommand) {
                 await updateAfterExecution(commandToSend);
-
-                // For step commands, also switch to registers panel to show changes
-                // Keep data synchronized but don't auto-switch panels
-                // User requested no automatic panel switching
             }
 
             // Handle register display commands
             if (commandToSend === "r") {
-                // The output should be processed to update register display
-                setTimeout(async () => {
-                    const regResult = await enqueueEmulatorCommand("r");
-                    if (regResult.ok) {
-                        ingestRegisterDump(regResult.output);
-                        updateRegistersFromCurrentValues();
-                    }
-                }, 100);
+                ingestRegisterDump(result.output);
+                updateRegistersFromCurrentValues();
             }
         } else {
             // Display emulator errors with proper formatting
@@ -1447,111 +1647,6 @@ async function sendCommand(command) {
     }
 }
 
-function getCurrentPC() {
-    // Extract PC from current register values
-    return parseInt(currentRegisterValues["pc"] || "0", 16);
-}
-
-async function getCurrentInstruction() {
-    try {
-        // Get current program counter and instruction from emulator
-        const result = await enqueueEmulatorCommand("info program");
-        if (result.ok && result.output) {
-            // Parse the output to extract current instruction
-            const lines = result.output.split("\n");
-            for (const line of lines) {
-                // Look for instruction format like "Next: addi x1, x0, 10"
-                if (line.includes("Next:")) {
-                    const instruction = line.replace("Next:", "").trim();
-                    if (instruction) return instruction;
-                }
-                // Also look for current PC instruction
-                if (line.includes("inst:") && line.includes("pc:")) {
-                    // Extract instruction from debug output
-                    const parts = line.split("src line");
-                    if (parts.length > 1) {
-                        // Try to get the instruction from source
-                        return extractInstructionFromDebug(line);
-                    }
-                }
-            }
-        }
-
-        // Fallback: try to get instruction from current PC by reading source
-        if (monacoEditor && currentRegisterValues["pc"]) {
-            const currentLine = getCurrentSourceLine();
-            if (currentLine) {
-                return parseInstructionFromSource(currentLine);
-            }
-        }
-
-        return "nop"; // Default fallback
-    } catch (error) {
-        console.warn("Failed to get current instruction:", error);
-        return "nop";
-    }
-}
-
-function extractInstructionFromDebug(debugLine) {
-    // Extract instruction from debug output like "[inst: 1 pc: 0, src line 1]"
-    try {
-        const match = debugLine.match(/\[inst:\s*\d+\s+pc:\s*\d+.*src line\s*(\d+)\]/);
-        if (match && monacoEditor) {
-            const lineNumber = parseInt(match[1]);
-            const model = monacoEditor.getModel();
-            if (model && lineNumber > 0) {
-                const lineContent = model.getLineContent(lineNumber);
-                return parseInstructionFromSource(lineContent);
-            }
-        }
-    } catch (error) {
-        console.warn("Failed to extract instruction from debug:", error);
-    }
-    return "nop";
-}
-
-function getCurrentSourceLine() {
-    try {
-        if (!monacoEditor) return null;
-
-        const model = monacoEditor.getModel();
-        if (!model) return null;
-
-        // Try to get current line from PC mapping
-        // This would need actual PC to source line mapping from emulator
-        const position = monacoEditor.getPosition();
-        if (position) {
-            return model.getLineContent(position.lineNumber);
-        }
-
-        return null;
-    } catch (error) {
-        console.warn("Failed to get current source line:", error);
-        return null;
-    }
-}
-
-function parseInstructionFromSource(sourceLine) {
-    if (!sourceLine) return "nop";
-
-    // Clean up the source line (remove comments, extra whitespace)
-    let instruction = sourceLine.split("#")[0].trim(); // Remove comments
-    instruction = instruction.split("//")[0].trim(); // Remove C++ style comments
-
-    // Skip labels and directives
-    if (instruction.endsWith(":") || instruction.startsWith(".")) {
-        return "nop";
-    }
-
-    // Extract just the instruction part
-    const parts = instruction.split(/\s+/);
-    if (parts.length > 0 && parts[0]) {
-        return instruction; // Return the full instruction
-    }
-
-    return "nop";
-}
-
 function updateBreakpointDisplay() {
     // Update breakpoint decorations in Monaco Editor
     if (monacoEditor && currentViewMode === "assembly") {
@@ -1575,7 +1670,43 @@ function addQuickCommands() {
 
 async function syncBreakpoints() {
     for (const lineNum of breakpoints) {
-        await sendCommand(`b ${lineNum}`);
+        await enqueueEmulatorCommand(`b${lineNum}`);
+    }
+}
+
+// The Run button restarts the program from the beginning: respawn the emulator on
+// the same file, replay the breakpoints, then run to the first breakpoint or exit.
+async function restartProgram() {
+    if (!asmPath) {
+        showNotification("No assembly file loaded", "error");
+        return;
+    }
+
+    try {
+        await window.api.stopEmu();
+        ideState.emulatorRunning = false;
+
+        previousRegisterValues = {};
+        currentRegisterValues = {};
+        currentExecutionLine = null;
+
+        const runRes = await window.api.runEmu(asmPath);
+        if (!runRes.ok) {
+            showNotification(`Failed to start emulator: ${runRes.error || "Unknown error"}`, "error");
+            updateButtonStates();
+            return;
+        }
+
+        ideState.emulatorRunning = true;
+        updateButtonStates();
+
+        await syncBreakpoints();
+        await sendCommand("c");
+    } catch (error) {
+        console.error("Restart failed:", error);
+        showNotification(`Restart failed: ${error.message}`, "error");
+    } finally {
+        updateButtonStates();
     }
 }
 
@@ -1677,11 +1808,14 @@ function setupButtonHandlers() {
     });
 
     document.getElementById("newFile").addEventListener("click", async () => {
+        if (!confirmDiscardUnsavedEdits("create a new file")) return;
         const template = `# RISC-V Assembly\n.globl _start\n_start:\n    nop`;
         const res = await window.api.newFile("untitled.s", template);
         if (res) {
             asmPath = res;
-            document.getElementById("asmLabel").textContent = "untitled.s";
+            filePaths.assembly = res;
+            filePaths.c = null;
+            document.getElementById("asmLabel").textContent = fileNameFromPath(res);
             if (monacoEditor) {
                 setModelContent("assembly", template);
                 setModelContent("c", "");
@@ -1707,10 +1841,10 @@ function setupButtonHandlers() {
     document.getElementById("toggleView").addEventListener("click", toggleFileView);
 
     document.getElementById("clearEditor").addEventListener("click", () => {
-        if (monacoEditor) {
-            setModelContent(currentViewMode, "");
-            updateButtonStates();
-        }
+        if (!monacoEditor) return;
+        if (!confirmDiscardUnsavedEdits("clear the editor")) return;
+        setModelContent(currentViewMode, "");
+        updateButtonStates();
     });
 
     document.getElementById("formatCode").addEventListener("click", () => {
@@ -1926,42 +2060,40 @@ function setupButtonHandlers() {
     });
 
     // Breakpoint buttons
-    document.getElementById("bpSet").addEventListener("click", () => {
+    document.getElementById("bpSet").addEventListener("click", async () => {
         const lineInput = document.getElementById("bpLine");
-        const lineNumber = parseInt(lineInput.value.trim());
+        const lineNumber = parseInt(lineInput.value.trim(), 10);
 
         if (isNaN(lineNumber) || lineNumber < 1) {
             showNotification("Please enter a valid line number", "error");
             return;
         }
 
-        // Set breakpoint in Monaco editor
-        if (monacoEditor) {
-            toggleBreakpoint(lineNumber);
-            lineInput.value = "";
-            showNotification(`Breakpoint set at line ${lineNumber}`, "success");
-        } else {
+        if (!monacoEditor) {
             showNotification("Editor not initialized", "error");
+            return;
         }
+
+        await setBreakpoint(lineNumber);
+        lineInput.value = "";
     });
 
-    document.getElementById("bpDel").addEventListener("click", () => {
+    document.getElementById("bpDel").addEventListener("click", async () => {
         const lineInput = document.getElementById("bpLine");
-        const lineNumber = parseInt(lineInput.value.trim());
+        const lineNumber = parseInt(lineInput.value.trim(), 10);
 
         if (isNaN(lineNumber) || lineNumber < 1) {
             showNotification("Please enter a valid line number", "error");
             return;
         }
 
-        // Remove breakpoint from Monaco editor
-        if (monacoEditor) {
-            toggleBreakpoint(lineNumber); // This function toggles, so calling it twice removes
-            lineInput.value = "";
-            showNotification(`Breakpoint removed from line ${lineNumber}`, "success");
-        } else {
+        if (!monacoEditor) {
             showNotification("Editor not initialized", "error");
+            return;
         }
+
+        await removeBreakpoint(lineNumber);
+        lineInput.value = "";
     });
 
     // Allow Enter key in breakpoint line input
@@ -2057,6 +2189,8 @@ function setupButtonHandlers() {
             if (cmd === "q") {
                 // Use the same logic as the main stop button
                 document.getElementById("stop").click();
+            } else if (cmd === "restart") {
+                await restartProgram();
             } else if (cmd === "s") {
                 await performSingleStep();
             } else if (cmd === "info registers") {
@@ -2104,7 +2238,7 @@ function setupButtonHandlers() {
         // F5 for run, F10 for step
         if (e.key === "F5" && !e.shiftKey) {
             e.preventDefault();
-            document.querySelector('[data-cmd="r"]')?.click();
+            document.querySelector('[data-cmd="restart"]')?.click();
         } else if (e.key === "F10") {
             e.preventDefault();
             const stepButton = document.querySelector('[data-cmd="s"]');
@@ -2126,7 +2260,6 @@ function setupButtonHandlers() {
     // Enhanced memory examination with format support
     document.getElementById("memBtn").addEventListener("click", async () => {
         const addr = document.getElementById("memAddr").value.trim();
-        const format = document.getElementById("memFormat").value;
         const length = document.getElementById("memLen").value.trim() || "16";
 
         if (!addr) {
@@ -2134,18 +2267,23 @@ function setupButtonHandlers() {
             return;
         }
 
+        // The emulator counts words, and takes no format argument - the memFormat
+        // selector is applied client-side in updateMemoryDisplay.
         const command = `m ${addr} ${length}`;
         const result = await enqueueEmulatorCommand(command);
 
         if (result.ok) {
-            // Display in terminal
             terminal.writeln(`>> ${command}`);
-            terminal.writeln(result.output);
-
-            // Update CPUlator-style memory display
             updateMemoryDisplay(result.output);
+            switchToPanel("memory");
         } else {
             terminal.writeln(`Error: ${result.error}`);
+        }
+    });
+
+    document.getElementById("memFormat").addEventListener("change", () => {
+        if (lastMemoryOutput) {
+            updateMemoryDisplay(lastMemoryOutput);
         }
     });
 
@@ -2225,8 +2363,6 @@ async function syncAllPanels(reason = "update") {
             const listResult = await enqueueEmulatorCommand("l");
             if (listResult.ok && listResult.output) {
                 console.log("📄 List command output:", listResult.output.substring(0, 200) + "...");
-                // Parse immediately to update currentExecutionLine
-                parseEmulatorOutputForTrace(listResult.output);
             }
         }
 
@@ -2253,27 +2389,27 @@ async function syncAllPanels(reason = "update") {
         const memoryAddrInput = document.getElementById("memoryAddr");
         let memoryAddr = memoryAddrInput?.value;
 
-        // Auto-populate with stack pointer if no address specified
+        // Auto-populate with stack pointer if no address specified. Skip entirely when
+        // SP is 0 or absent - there is no meaningful stack window to show.
         if (!memoryAddr || !memoryAddr.trim()) {
-            const sp =
-                currentRegisterValues["x02"] ||
-                currentRegisterValues["x2"] ||
-                currentRegisterValues["sp"];
-            if (sp) {
-                const spValue = parseInt(sp, 16);
-                // Show memory around stack pointer (64 bytes before SP to see stack contents)
-                memoryAddr = `0x${(spValue - 64).toString(16)}`;
+            const sp = getRegisterValue(currentRegisterValues, "sp");
+            const spValue = sp ? parseInt(sp, 16) : 0;
+            if (Number.isFinite(spValue) && spValue > 0) {
+                const windowStart = Math.max(0, spValue - 64) & ~0xf;
+                memoryAddr = `0x${windowStart.toString(16)}`;
                 if (memoryAddrInput) {
                     memoryAddrInput.value = memoryAddr;
                 }
+            } else {
+                memoryAddr = "";
             }
         }
 
         // Update memory display if we have an address
         if (memoryAddr && memoryAddr.trim()) {
-            const memoryLen = document.getElementById("memoryLen")?.value || "64";
-            console.log(`📤 Fetching memory at ${memoryAddr}, length ${memoryLen}`);
-            const memResult = await enqueueEmulatorCommand(`m ${memoryAddr} ${memoryLen}`);
+            const memoryLen = document.getElementById("memoryLen")?.value || "16";
+            console.log(`📤 Fetching memory at ${memoryAddr}, length ${memoryLen} words`);
+            const memResult = await enqueueEmulatorCommand(`m ${memoryAddr.trim()} ${memoryLen}`);
             if (memResult.ok) {
                 updateMemoryDisplay(memResult.output);
                 console.log("✅ Memory panel updated");
@@ -2352,10 +2488,6 @@ async function performSingleStep() {
 
         if (result.output) {
             console.log("📄 Raw emulator output length:", result.output.length);
-            console.log("📄 Raw emulator output:", result.output.substring(0, 200) + "...");
-
-            // Parse the step output immediately for current line tracking
-            parseEmulatorOutputForTrace(result.output);
         }
 
         if (result.ok) {
@@ -2368,7 +2500,7 @@ async function performSingleStep() {
 
             // Look for the basic state info [inst: X, pc: Y, src: Z]
             for (const line of lines) {
-                const stateMatch = line.match(/\[inst:\s*(\d+),\s*pc:\s*(\d+),\s*src:\s*(\d+)\]/);
+                const stateMatch = line.match(STATUS_LINE_REGEX);
                 if (stateMatch) {
                     const [, inst, pc, src] = stateMatch;
                     currentState = { inst, pc, src };
@@ -2413,32 +2545,30 @@ async function performSingleStep() {
             // Re-enable terminal output and show clean step output
             suppressTerminalOutput = false;
 
-            // Show clean step output with next instruction info
+            // Show clean step output with the executed instruction
             if (currentState) {
-                // Look for "Next:" instruction in the output
-                let nextInstruction = null;
+                let executedInstruction = null;
                 for (const line of lines) {
-                    const nextMatch = line.match(/^Next:\s*(.+)$/);
-                    if (nextMatch) {
-                        nextInstruction = nextMatch[1].trim();
+                    const executedMatch = line.match(/^Executed:\s*(.+)$/);
+                    if (executedMatch) {
+                        executedInstruction = executedMatch[1].trim();
                         break;
                     }
                 }
 
-                // Show the next instruction and execution context
-                if (nextInstruction) {
-                    terminal.writeln(`Next: ${nextInstruction}`);
+                if (executedInstruction) {
+                    terminal.writeln(`Executed: ${executedInstruction}`);
 
                     // Show instruction reference information
-                    const instrInfo = getInstructionInfo(nextInstruction);
+                    const instrInfo = getInstructionInfo(executedInstruction);
                     if (instrInfo) {
                         terminal.writeln(`  ${instrInfo.name} - ${instrInfo.description}`);
                     }
                 }
                 terminal.writeln(
-                    `[inst: ${currentState.inst.padStart(7)}, pc: ${currentState.pc.padStart(
-                        7
-                    )}, src line: ${currentState.src.padStart(4)}]`
+                    `[inst: ${currentState.inst.padStart(4)}, pc: ${currentState.pc.padStart(
+                        4
+                    )}, src: ${currentState.src.padStart(4)}]`
                 );
             } else {
                 terminal.writeln(`Step ${stepCount} executed`);
@@ -2575,437 +2705,154 @@ async function refreshDisassemblyPanel(startAddr, count = 20) {
     }
 }
 
-function parseMemoryOutput(output) {
-    const memoryData = [];
-    const lines = output.split("\n");
+// Remembered so the format selector can re-render without re-querying the emulator.
+let lastMemoryOutput = null;
 
-    for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-
-        // Parse hex memory output format
-        // Expected format: address: value value value ...
-        const match = trimmed.match(/^([0-9a-fA-F]+):\s*(.+)$/);
-        if (match) {
-            const [, addr, values] = match;
-            const address = parseInt(addr, 16);
-            const hexValues = values.split(/\s+/).filter((v) => v && /^[0-9a-fA-F]+$/.test(v));
-
-            for (let i = 0; i < hexValues.length; i++) {
-                memoryData.push({
-                    address: address + i * 4,
-                    instruction: parseInt(hexValues[i], 16),
-                });
-            }
-        }
-    }
-
-    return memoryData;
+function getMemoryFormat() {
+    const select = document.getElementById("memFormat");
+    return select ? select.value : "x";
 }
 
-function disassembleMemoryData(memoryData, baseAddr, count) {
-    let html = "";
+function parseMemoryDump(memoryOutput) {
+    const bytes = new Map();
+    let baseAddress = null;
+    let endAddress = null;
 
-    for (let i = 0; i < Math.min(count, memoryData.length); i++) {
-        const data = memoryData[i];
-        if (!data) continue;
+    memoryOutput.split(/\r?\n/).forEach((line) => {
+        const match = line.match(/^\s*(?:0x)?([0-9a-fA-F]+):\s*(.+)$/);
+        if (!match) return;
 
-        const address = data.address;
-        const instruction = data.instruction;
-        const addressHex = `0x${address.toString(16).padStart(8, "0")}`;
-        const opcodeHex = `0x${instruction.toString(16).padStart(8, "0")}`;
+        const addr = Number.parseInt(match[1], 16);
+        if (Number.isNaN(addr)) return;
 
-        // Simple RISC-V disassembly
-        const disasm = disassembleInstruction(instruction);
-        const isCurrentPC = currentRegisterValues["pc"] === address.toString(16);
+        match[2]
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean)
+            .forEach((token, index) => {
+                const value = Number.parseInt(token.replace(/^0x/i, ""), 16);
+                if (Number.isNaN(value)) return;
+                const byteAddr = addr + index;
+                bytes.set(byteAddr, value & 0xff);
+                if (baseAddress === null || byteAddr < baseAddress) baseAddress = byteAddr;
+                if (endAddress === null || byteAddr > endAddress) endAddress = byteAddr;
+            });
+    });
 
-        html += `<div class="disasm-line ${isCurrentPC ? "current-pc" : ""}">
-            <span class="disasm-addr">${addressHex}</span>
-            <span class="disasm-opcode">${opcodeHex}</span>
-            <span class="disasm-instr">${disasm}</span>
-            <span class="disasm-comment"></span>
-        </div>`;
-    }
-
-    return html;
+    return { bytes, baseAddress, endAddress };
 }
 
+function readMemoryWord(bytes, addr) {
+    let value = 0;
+    for (let i = 3; i >= 0; i--) {
+        const byte = bytes.get(addr + i);
+        if (byte === undefined) return null;
+        value = (value << 8) | byte;
+    }
+    return value >>> 0;
+}
+
+// The emulator's "m" command takes no format argument, so every format other than
+// raw hex is rendered here from the same byte dump.
 function updateMemoryDisplay(memoryOutput) {
     const memoryDisplay = document.getElementById("memoryDisplay");
     if (!memoryDisplay) return;
+
+    if (typeof memoryOutput === "string") {
+        lastMemoryOutput = memoryOutput;
+    }
 
     if (!memoryOutput || !memoryOutput.trim()) {
         memoryDisplay.innerHTML = '<div class="empty-message">No memory data available</div>';
         return;
     }
 
-    const lines = memoryOutput.split(/\r?\n/);
+    const { bytes, baseAddress, endAddress } = parseMemoryDump(memoryOutput);
 
-    // Parse all memory data into a flat array
-    let memoryData = [];
-    let baseAddress = 0;
-
-    lines.forEach((line) => {
-        const match = line.match(/^\s*([^:]+):\s*(.+)$/);
-        if (!match) return;
-
-        const address = match[1].trim();
-        const rawValues = match[2].trim().split(/\s+/).filter(Boolean);
-
-        // Parse address
-        const addr = parseInt(address.replace("0x", ""), 16);
-        if (memoryData.length === 0) {
-            baseAddress = addr;
-        }
-
-        // Parse bytes
-        rawValues.forEach((token, index) => {
-            const hexCandidate = token.startsWith("0x") ? token.slice(2) : token;
-            let value = Number.parseInt(hexCandidate, 16);
-            if (!Number.isNaN(value)) {
-                memoryData.push({
-                    address: addr + index,
-                    value: value & 0xff,
-                });
-            }
-        });
-    });
-
-    if (memoryData.length === 0) {
+    if (bytes.size === 0 || baseAddress === null) {
         memoryDisplay.innerHTML = '<div class="empty-message">No memory data available</div>';
         return;
     }
 
-    // Build CPUlator-style display: 16 bytes per row with word grouping
-    let html = '<div class="memory-table">';
+    const format = getMemoryFormat();
+    const bytesPerRow = format === "t" ? 4 : 16;
+    const startAddr = Math.floor(baseAddress / bytesPerRow) * bytesPerRow;
 
-    // Header row
+    let header;
+    if (format === "x") {
+        header = "+0 +1 +2 +3  +4 +5 +6 +7  +8 +9 +A +B  +C +D +E +F";
+    } else if (format === "c") {
+        header = "Characters";
+    } else if (format === "t") {
+        header = "Binary (+0 +1 +2 +3)";
+    } else {
+        header = "Words (little-endian)";
+    }
+
+    let html = '<div class="memory-table">';
     html += '<div class="memory-header">';
     html += '<span class="mem-addr-header">Address</span>';
-    html +=
-        '<span class="mem-hex-header">+0 +1 +2 +3  +4 +5 +6 +7  +8 +9 +A +B  +C +D +E +F</span>';
+    html += `<span class="mem-hex-header">${header}</span>`;
     html += '<span class="mem-ascii-header">ASCII</span>';
     html += "</div>";
 
-    // Align to 16-byte boundaries
-    const startAddr = Math.floor(baseAddress / 16) * 16;
-    const endAddr = memoryData[memoryData.length - 1].address;
-
-    for (let addr = startAddr; addr <= endAddr; addr += 16) {
+    for (let addr = startAddr; addr <= endAddress; addr += bytesPerRow) {
         html += '<div class="memory-row">';
-
-        // Address column
         html += `<span class="memory-address">0x${addr
             .toString(16)
             .padStart(8, "0")
             .toUpperCase()}</span>`;
 
-        // Hex bytes column - grouped by 4 bytes (words)
         html += '<span class="memory-hex">';
         let ascii = "";
 
-        for (let i = 0; i < 16; i++) {
-            const byteAddr = addr + i;
-            const memByte = memoryData.find((m) => m.address === byteAddr);
-
-            if (memByte) {
-                const hexStr = memByte.value.toString(16).padStart(2, "0").toUpperCase();
-                html += `<span class="mem-byte">${hexStr}</span>`;
-
-                // ASCII representation
-                const ch = memByte.value;
-                ascii += ch >= 32 && ch <= 126 ? String.fromCharCode(ch) : "·";
-            } else {
-                html += '<span class="mem-byte mem-empty">··</span>';
-                ascii += "·";
+        if (format === "d" || format === "u") {
+            for (let i = 0; i < bytesPerRow; i += 4) {
+                const word = readMemoryWord(bytes, addr + i);
+                if (word === null) {
+                    html += '<span class="mem-byte mem-empty">----------</span>';
+                } else {
+                    const shown = format === "d" ? word | 0 : word;
+                    html += `<span class="mem-byte">${shown.toString(10).padStart(11, " ")}</span>`;
+                }
             }
+        } else {
+            for (let i = 0; i < bytesPerRow; i++) {
+                const value = bytes.get(addr + i);
 
-            // Add spacing every 4 bytes (word boundary)
-            if ((i + 1) % 4 === 0 && i < 15) {
-                html += '<span class="mem-spacer"> </span>';
+                if (value === undefined) {
+                    const filler = format === "t" ? "........" : "··";
+                    html += `<span class="mem-byte mem-empty">${filler}</span>`;
+                } else if (format === "t") {
+                    html += `<span class="mem-byte">${value.toString(2).padStart(8, "0")}</span>`;
+                } else if (format === "c") {
+                    const ch = value >= 32 && value <= 126 ? String.fromCharCode(value) : ".";
+                    html += `<span class="mem-byte">${escapeHtml(ch)} </span>`;
+                } else {
+                    html += `<span class="mem-byte">${value
+                        .toString(16)
+                        .padStart(2, "0")
+                        .toUpperCase()}</span>`;
+                }
+
+                ascii +=
+                    value !== undefined && value >= 32 && value <= 126
+                        ? String.fromCharCode(value)
+                        : "·";
+
+                if (format === "x" && (i + 1) % 4 === 0 && i < bytesPerRow - 1) {
+                    html += '<span class="mem-spacer"> </span>';
+                }
             }
         }
         html += "</span>";
 
-        // ASCII column
-        html += `<span class="memory-ascii">${ascii}</span>`;
-
+        html += `<span class="memory-ascii">${escapeHtml(ascii)}</span>`;
         html += "</div>";
     }
 
     html += "</div>";
     memoryDisplay.innerHTML = html;
-}
-
-function disassembleInstruction(instruction) {
-    // Basic RISC-V instruction decoding
-    const opcode = instruction & 0x7f;
-
-    switch (opcode) {
-        case 0x33: // R-type (add, sub, and, or, etc.)
-            return disassembleRType(instruction);
-        case 0x13: // I-type (addi, andi, ori, etc.)
-            return disassembleIType(instruction);
-        case 0x03: // Load instructions
-            return disassembleLoadType(instruction);
-        case 0x23: // Store instructions
-            return disassembleStoreType(instruction);
-        case 0x63: // Branch instructions
-            return disassembleBranchType(instruction);
-        case 0x6f: // JAL
-            return disassembleJType(instruction);
-        case 0x67: // JALR
-            return disassembleJALR(instruction);
-        case 0x37: // LUI
-            return disassembleLUI(instruction);
-        case 0x17: // AUIPC
-            return disassembleAUIPC(instruction);
-        default:
-            return `unknown (0x${instruction.toString(16)})`;
-    }
-}
-
-function disassembleRType(instruction) {
-    const rd = (instruction >> 7) & 0x1f;
-    const funct3 = (instruction >> 12) & 0x7;
-    const rs1 = (instruction >> 15) & 0x1f;
-    const rs2 = (instruction >> 20) & 0x1f;
-    const funct7 = (instruction >> 25) & 0x7f;
-
-    const rdName = getRegisterName(rd);
-    const rs1Name = getRegisterName(rs1);
-    const rs2Name = getRegisterName(rs2);
-
-    if (funct7 === 0x00) {
-        switch (funct3) {
-            case 0x0:
-                return `add ${rdName}, ${rs1Name}, ${rs2Name}`;
-            case 0x4:
-                return `xor ${rdName}, ${rs1Name}, ${rs2Name}`;
-            case 0x6:
-                return `or ${rdName}, ${rs1Name}, ${rs2Name}`;
-            case 0x7:
-                return `and ${rdName}, ${rs1Name}, ${rs2Name}`;
-            case 0x1:
-                return `sll ${rdName}, ${rs1Name}, ${rs2Name}`;
-            case 0x5:
-                return `srl ${rdName}, ${rs1Name}, ${rs2Name}`;
-            case 0x2:
-                return `slt ${rdName}, ${rs1Name}, ${rs2Name}`;
-            case 0x3:
-                return `sltu ${rdName}, ${rs1Name}, ${rs2Name}`;
-        }
-    } else if (funct7 === 0x20) {
-        switch (funct3) {
-            case 0x0:
-                return `sub ${rdName}, ${rs1Name}, ${rs2Name}`;
-            case 0x5:
-                return `sra ${rdName}, ${rs1Name}, ${rs2Name}`;
-        }
-    }
-
-    return `r-type (0x${instruction.toString(16)})`;
-}
-
-function disassembleIType(instruction) {
-    const rd = (instruction >> 7) & 0x1f;
-    const funct3 = (instruction >> 12) & 0x7;
-    const rs1 = (instruction >> 15) & 0x1f;
-    const imm = (instruction >> 20) & 0xfff;
-    const signExtImm = imm > 0x7ff ? imm - 0x1000 : imm;
-
-    const rdName = getRegisterName(rd);
-    const rs1Name = getRegisterName(rs1);
-
-    switch (funct3) {
-        case 0x0:
-            return `addi ${rdName}, ${rs1Name}, ${signExtImm}`;
-        case 0x2:
-            return `slti ${rdName}, ${rs1Name}, ${signExtImm}`;
-        case 0x3:
-            return `sltiu ${rdName}, ${rs1Name}, ${signExtImm}`;
-        case 0x4:
-            return `xori ${rdName}, ${rs1Name}, ${signExtImm}`;
-        case 0x6:
-            return `ori ${rdName}, ${rs1Name}, ${signExtImm}`;
-        case 0x7:
-            return `andi ${rdName}, ${rs1Name}, ${signExtImm}`;
-        case 0x1:
-            return `slli ${rdName}, ${rs1Name}, ${imm & 0x1f}`;
-        case 0x5:
-            if (imm >> 5 === 0x00) return `srli ${rdName}, ${rs1Name}, ${imm & 0x1f}`;
-            if (imm >> 5 === 0x20) return `srai ${rdName}, ${rs1Name}, ${imm & 0x1f}`;
-            break;
-    }
-
-    return `i-type (0x${instruction.toString(16)})`;
-}
-
-function disassembleLoadType(instruction) {
-    const rd = (instruction >> 7) & 0x1f;
-    const funct3 = (instruction >> 12) & 0x7;
-    const rs1 = (instruction >> 15) & 0x1f;
-    const imm = (instruction >> 20) & 0xfff;
-    const signExtImm = imm > 0x7ff ? imm - 0x1000 : imm;
-
-    const rdName = getRegisterName(rd);
-    const rs1Name = getRegisterName(rs1);
-
-    switch (funct3) {
-        case 0x0:
-            return `lb ${rdName}, ${signExtImm}(${rs1Name})`;
-        case 0x1:
-            return `lh ${rdName}, ${signExtImm}(${rs1Name})`;
-        case 0x2:
-            return `lw ${rdName}, ${signExtImm}(${rs1Name})`;
-        case 0x4:
-            return `lbu ${rdName}, ${signExtImm}(${rs1Name})`;
-        case 0x5:
-            return `lhu ${rdName}, ${signExtImm}(${rs1Name})`;
-    }
-
-    return `load (0x${instruction.toString(16)})`;
-}
-
-function disassembleStoreType(instruction) {
-    const funct3 = (instruction >> 12) & 0x7;
-    const rs1 = (instruction >> 15) & 0x1f;
-    const rs2 = (instruction >> 20) & 0x1f;
-    const imm = ((instruction >> 25) << 5) | ((instruction >> 7) & 0x1f);
-    const signExtImm = imm > 0x7ff ? imm - 0x1000 : imm;
-
-    const rs1Name = getRegisterName(rs1);
-    const rs2Name = getRegisterName(rs2);
-
-    switch (funct3) {
-        case 0x0:
-            return `sb ${rs2Name}, ${signExtImm}(${rs1Name})`;
-        case 0x1:
-            return `sh ${rs2Name}, ${signExtImm}(${rs1Name})`;
-        case 0x2:
-            return `sw ${rs2Name}, ${signExtImm}(${rs1Name})`;
-    }
-
-    return `store (0x${instruction.toString(16)})`;
-}
-
-function disassembleBranchType(instruction) {
-    const funct3 = (instruction >> 12) & 0x7;
-    const rs1 = (instruction >> 15) & 0x1f;
-    const rs2 = (instruction >> 20) & 0x1f;
-
-    const rs1Name = getRegisterName(rs1);
-    const rs2Name = getRegisterName(rs2);
-
-    switch (funct3) {
-        case 0x0:
-            return `beq ${rs1Name}, ${rs2Name}, <offset>`;
-        case 0x1:
-            return `bne ${rs1Name}, ${rs2Name}, <offset>`;
-        case 0x4:
-            return `blt ${rs1Name}, ${rs2Name}, <offset>`;
-        case 0x5:
-            return `bge ${rs1Name}, ${rs2Name}, <offset>`;
-        case 0x6:
-            return `bltu ${rs1Name}, ${rs2Name}, <offset>`;
-        case 0x7:
-            return `bgeu ${rs1Name}, ${rs2Name}, <offset>`;
-    }
-
-    return `branch (0x${instruction.toString(16)})`;
-}
-
-function disassembleJType(instruction) {
-    const rd = (instruction >> 7) & 0x1f;
-    const rdName = getRegisterName(rd);
-    return `jal ${rdName}, <offset>`;
-}
-
-function disassembleJALR(instruction) {
-    const rd = (instruction >> 7) & 0x1f;
-    const rs1 = (instruction >> 15) & 0x1f;
-    const imm = (instruction >> 20) & 0xfff;
-    const signExtImm = imm > 0x7ff ? imm - 0x1000 : imm;
-
-    const rdName = getRegisterName(rd);
-    const rs1Name = getRegisterName(rs1);
-
-    return `jalr ${rdName}, ${rs1Name}, ${signExtImm}`;
-}
-
-function disassembleLUI(instruction) {
-    const rd = (instruction >> 7) & 0x1f;
-    const imm = instruction >> 12;
-    const rdName = getRegisterName(rd);
-
-    return `lui ${rdName}, 0x${imm.toString(16)}`;
-}
-
-function disassembleAUIPC(instruction) {
-    const rd = (instruction >> 7) & 0x1f;
-    const imm = instruction >> 12;
-    const rdName = getRegisterName(rd);
-
-    return `auipc ${rdName}, 0x${imm.toString(16)}`;
-}
-
-function getRegisterName(regNum) {
-    const regNames = [
-        "zero",
-        "ra",
-        "sp",
-        "gp",
-        "tp",
-        "t0",
-        "t1",
-        "t2",
-        "s0",
-        "s1",
-        "a0",
-        "a1",
-        "a2",
-        "a3",
-        "a4",
-        "a5",
-        "a6",
-        "a7",
-        "s2",
-        "s3",
-        "s4",
-        "s5",
-        "s6",
-        "s7",
-        "s8",
-        "s9",
-        "s10",
-        "s11",
-        "t3",
-        "t4",
-        "t5",
-        "t6",
-    ];
-
-    return regNames[regNum] || `x${regNum}`;
-}
-
-function createPlaceholderDisassembly(baseAddr, count) {
-    const disasmContent = document.getElementById("disasmContent");
-    if (!disasmContent) return;
-
-    let html = "";
-    for (let i = 0; i < count; i++) {
-        const address = baseAddr + i * 4;
-        const addressHex = `0x${address.toString(16).padStart(8, "0")}`;
-
-        html += `<div class="disasm-line">
-            <span class="disasm-addr">${addressHex}</span>
-            <span class="disasm-opcode">????????</span>
-            <span class="disasm-instr">nop</span>
-            <span class="disasm-comment"># placeholder</span>
-        </div>`;
-    }
-
-    disasmContent.innerHTML = html;
 }
 
 async function handleViewStatus() {
@@ -3024,37 +2871,17 @@ async function handleViewStatus() {
     }
 }
 
-// Highlight registers that changed during step execution
-function highlightChangedRegisters(previousValues) {
-    for (let i = 0; i < 32; i++) {
-        const regName = `x${i}`;
-        const currentValue = currentRegisterValues[regName] || "0";
-        const previousValue = previousValues[regName] || "0";
-
-        if (previousValue !== currentValue) {
-            const registerElement = document.querySelector(`[data-register="${regName}"]`);
-            if (registerElement) {
-                registerElement.classList.add("changed");
-                // Remove highlight after animation
-                setTimeout(() => {
-                    registerElement.classList.remove("changed");
-                }, 2000);
-            }
-        }
-    }
-}
-
 // Removed unused logStepToTrace function - trace entries are now handled in performSingleStep
 
 // Highlight current instruction in disassembly panel
 function highlightCurrentInstructionInDisassembly(pcHex) {
-    const normalized = (pcHex || "").toString().replace(/^0x/i, "").toLowerCase();
+    const normalized = normalizeAddressHex(pcHex);
     const disasmLines = document.querySelectorAll(".disasm-line");
     let target = null;
 
     disasmLines.forEach((line) => {
         line.classList.remove("current-pc");
-        if (!target && line.dataset.address === normalized) {
+        if (!target && normalized && line.dataset.address === normalized) {
             target = line;
         }
     });
@@ -3065,17 +2892,18 @@ function highlightCurrentInstructionInDisassembly(pcHex) {
     }
 }
 
-// Enhanced source panel highlighting
+// Enhanced source panel highlighting. The source panel uses "current-line";
+// "current-pc" belongs to the disassembly panel only.
 function highlightCurrentSourceLine() {
-    // Remove previous highlights
     const sourceLines = document.querySelectorAll(".source-line");
-    sourceLines.forEach((line) => line.classList.remove("current-pc"));
+    sourceLines.forEach((line) => line.classList.remove("current-line"));
 
-    // Highlight current execution line
     if (currentExecutionLine) {
-        const currentLineElement = document.querySelector(`[data-line="${currentExecutionLine}"]`);
+        const currentLineElement = document.querySelector(
+            `.source-line[data-line="${currentExecutionLine}"]`
+        );
         if (currentLineElement) {
-            currentLineElement.classList.add("current-pc");
+            currentLineElement.classList.add("current-line");
         }
     }
 }
@@ -3246,121 +3074,6 @@ function findNearestExecutableLine(lineNumber) {
     return startLine;
 }
 
-// Parse current line information from 'list' command output
-function parseCurrentLineFromList(listOutput) {
-    if (!listOutput) return null;
-    const lines = listOutput.split("\n");
-
-    console.log("🔍 parseCurrentLineFromList called with", lines.length, "lines");
-    console.log("🔍 First 3 lines:", lines.slice(0, 3));
-    console.log("🔍 Last 3 lines:", lines.slice(-3));
-
-    // Look for the new CURRENT_LINE: format first
-    for (const line of lines) {
-        if (line.includes("CURRENT_LINE")) {
-            console.log("🎯 Found CURRENT_LINE in line:", line);
-        }
-        const currentLineMatch = line.match(/^CURRENT_LINE:\s*(\d+)$/);
-        if (currentLineMatch) {
-            const lineNumber = parseInt(currentLineMatch[1], 10);
-            console.log("🎯 Matched CURRENT_LINE format! Line number:", lineNumber);
-            return { lineNumber, isCurrent: true, content: "" };
-        }
-    }
-
-    const entries = [];
-
-    for (const rawLine of lines) {
-        const trimmed = rawLine.trimEnd();
-        if (!trimmed) continue;
-
-        const leadingMarkerMatch = trimmed.match(/^(\*|=>)\s*(\d+)\s*(.*)$/);
-        const trailingMarkerMatch = trimmed.match(/^\s*(\d+)\s*(\*|=>)\s*(.*)$/);
-        const plainMatch = trimmed.match(/^\s*(\d+)\s*(.*)$/);
-
-        let markerToken = "";
-        let lineNumber = null;
-        let content = "";
-
-        if (leadingMarkerMatch) {
-            markerToken = leadingMarkerMatch[1];
-            lineNumber = parseInt(leadingMarkerMatch[2], 10);
-            content = leadingMarkerMatch[3] || "";
-        } else if (trailingMarkerMatch) {
-            lineNumber = parseInt(trailingMarkerMatch[1], 10);
-            markerToken = trailingMarkerMatch[2];
-            content = trailingMarkerMatch[3] || "";
-        } else if (plainMatch) {
-            lineNumber = parseInt(plainMatch[1], 10);
-            content = plainMatch[2] || "";
-        }
-
-        if (lineNumber === null || Number.isNaN(lineNumber)) {
-            continue;
-        }
-
-        entries.push({
-            lineNumber,
-            content: content.trim(),
-            isCurrent: markerToken.includes("*") || markerToken.includes("=>"),
-        });
-    }
-
-    if (entries.length === 0) {
-        return null;
-    }
-
-    let currentIndex = entries.findIndex((entry) => entry.isCurrent);
-
-    if (currentIndex === -1) {
-        return null;
-    }
-
-    let selected = entries[currentIndex];
-
-    if (!isExecutableContent(selected.content)) {
-        for (let i = currentIndex + 1; i < entries.length; i++) {
-            if (isExecutableContent(entries[i].content)) {
-                selected = entries[i];
-                break;
-            }
-        }
-    }
-
-    if (!isExecutableContent(selected.content)) {
-        for (let i = currentIndex - 1; i >= 0; i--) {
-            if (isExecutableContent(entries[i].content)) {
-                selected = entries[i];
-                break;
-            }
-        }
-    }
-
-    const adjustedLineNumber = findNearestExecutableLine(selected.lineNumber);
-    let displayContent = selected.content;
-
-    if (monacoEditor) {
-        const model = monacoEditor.getModel();
-        if (model) {
-            const candidateContent = stripSourceLine(model.getLineContent(adjustedLineNumber));
-            if (candidateContent) {
-                displayContent = candidateContent;
-            }
-        }
-    }
-
-    return {
-        lineNumber: adjustedLineNumber,
-        content: displayContent,
-    };
-}
-
-// Check if a line contains executable code (not comment or empty)
-function isExecutableLine(lineInfo) {
-    if (!lineInfo) return false;
-    return isExecutableContent(lineInfo.content);
-}
-
 // Function to switch to a specific panel
 function switchToPanel(panelName) {
     const panelTabs = document.querySelector(".panel-tabs");
@@ -3487,7 +3200,7 @@ function highlightRiscVAssembly(line) {
     // Check for directive
     const directiveMatch = highlighted.match(patterns.directive);
     if (directiveMatch) {
-        let rest = directiveMatch[3];
+        let rest = escapeHtml(directiveMatch[3]);
         rest = rest.replace(patterns.string, '<span class="asm-string">$&</span>');
         rest = rest.replace(patterns.immediate, '<span class="asm-immediate">$&</span>');
         return `${directiveMatch[1]}<span class="asm-directive">${escapeHtml(
@@ -3498,7 +3211,7 @@ function highlightRiscVAssembly(line) {
     // Check for instruction
     const instructionMatch = highlighted.match(patterns.instruction);
     if (instructionMatch) {
-        let operands = instructionMatch[3];
+        let operands = escapeHtml(instructionMatch[3]);
 
         // Highlight registers
         operands = operands.replace(patterns.register, '<span class="asm-register">$&</span>');
@@ -3589,7 +3302,7 @@ async function resetEmulatorState() {
     }
 
     // Reset register panel
-    const registersContainer = document.getElementById("registers");
+    const registersContainer = document.getElementById("registersGrid");
     if (registersContainer) {
         registersContainer.innerHTML = '<div class="no-registers">No register data available</div>';
     }
@@ -3651,6 +3364,7 @@ async function resetEmulatorState() {
     if (traceCount) {
         traceCount.textContent = "0";
     }
+    lastRenderedTraceCycle = -1;
 
     // Reset IDE state flags
     ideState.built = false;
@@ -3668,17 +3382,6 @@ function updateDisassemblyDisplay(disasmOutput) {
     const disasmContent = document.getElementById("disasmContent");
     if (!disasmContent) return;
 
-    // If the output is already HTML, just set it directly
-    if (typeof disasmOutput === "string" && disasmOutput.includes('<div class="disasm-line">')) {
-        disasmContent.innerHTML = disasmOutput;
-        // Scroll to current PC if visible
-        const currentPCElement = disasmContent.querySelector(".current-pc");
-        if (currentPCElement) {
-            currentPCElement.scrollIntoView({ behavior: "smooth", block: "center" });
-        }
-        return;
-    }
-
     let html = "";
     if (!disasmOutput) {
         disasmContent.innerHTML = '<div class="empty-message">No disassembly data available</div>';
@@ -3690,14 +3393,16 @@ function updateDisassemblyDisplay(disasmOutput) {
         const trimmedLine = line.trim();
         if (!trimmedLine) return;
 
-        // Parse disassembly line format: address: opcode instruction
-        const match = trimmedLine.match(/^([0-9a-fA-F]+):\s*([0-9a-fA-F\s]+)\s+(.+)$/);
+        // Emulator format: "%08x: %08x    %s". The opcode must be anchored to exactly
+        // 8 hex digits, otherwise a mnemonic like "add" is swallowed as hex.
+        const match = trimmedLine.match(/^([0-9a-fA-F]{8}):\s*([0-9a-fA-F]{8})\s+(.+)$/);
         if (match) {
             const [, address, opcode, instruction] = match;
-            const normalizedAddr = address.toLowerCase();
+            const normalizedAddr = normalizeAddressHex(address);
             const displayAddr = `0x${normalizedAddr}`;
             const isCurrentPC =
-                (currentRegisterValues["pc"] || "").toLowerCase() === normalizedAddr;
+                normalizedAddr !== "" &&
+                normalizeAddressHex(currentRegisterValues["pc"]) === normalizedAddr;
 
             html += `<div class="disasm-line ${
                 isCurrentPC ? "current-pc" : ""
@@ -3823,14 +3528,14 @@ function parseEmulatorOutputForTrace(chunk) {
             updateSourceDisplay();
         }
 
-        // Parse instruction execution info: [inst: 1 pc: 0, src line 4]
-        const instMatch = trimmedLine.match(/\[inst:\s*(\d+)\s+pc:\s*(\d+),\s*src line\s*(\d+)\]/);
+        // Parse the prompt banner: [inst:    1, pc:    0, src:    3] (decimal fields)
+        const instMatch = trimmedLine.match(STATUS_LINE_REGEX);
         if (instMatch) {
             const [, instCount, pc, srcLine] = instMatch;
 
             // Always track the current PC even when terminal output is suppressed
-            currentRegisterValues["pc"] = parseInt(pc, 10).toString(16);
-            performanceCounters.instructions = parseInt(instCount);
+            currentRegisterValues["pc"] = (parseInt(pc, 10) >>> 0).toString(16);
+            performanceCounters.instructions = parseInt(instCount, 10);
 
             // Update current execution line and refresh source panel
             const rawLineNumber = parseInt(srcLine, 10);
@@ -3844,47 +3549,43 @@ function parseEmulatorOutputForTrace(chunk) {
             updateStatisticsPanel();
         }
 
-        // Parse "Next:" instruction line
-        const nextMatch = trimmedLine.match(/^Next:\s*(.+)$/);
-        if (nextMatch) {
-            const instruction = nextMatch[1].trim();
-            const pc = currentRegisterValues["pc"] ? parseInt(currentRegisterValues["pc"], 16) : 0;
-
-            // Don't add duplicate trace entries during step operations
-            // The step function will handle adding the trace entry with the executed instruction
-            if (!suppressTerminalOutput) {
-                // Only add trace entry if not during a step operation
-                addToTrace(instruction, pc, { ...currentRegisterValues });
-            }
-
+        // Parse the executed-instruction line: "Executed: addi sp, sp, -16"
+        const executedMatch = trimmedLine.match(/^Executed:\s*(.+)$/);
+        if (executedMatch) {
+            const instruction = executedMatch[1].trim();
             analyzeInstructionType(instruction);
             updateInstructionTypeStats();
         }
 
-        // Parse register changes: >> rf[x02] 0 -> 10000
+        // Detect termination via the emulator's PROGRAM_EXIT sentinel. The ">> "
+        // prompt carries no newline, so it can end up prefixing this line.
+        const exitMatch = trimmedLine.match(/(?:^|>>\s*)PROGRAM_EXIT:\s*(\w+)/);
+        if (exitMatch) {
+            handleProgramExit(exitMatch[1]);
+        }
+
+        // Parse register changes: >> rf[x02] 0 -> 10000 (both values are hex)
         const regMatch = trimmedLine.match(
-            /^>>\s*rf\[(\w+)\]\s*([0-9a-fA-Fx]+)\s*->\s*([0-9a-fA-Fx]+)$/
+            /^>>\s*rf\[([0-9a-zA-Z]+)\]\s*(0x)?([0-9a-fA-F]+)\s*->\s*(0x)?([0-9a-fA-F]+)$/
         );
         if (regMatch) {
-            const [, regName, oldValue, newValue] = regMatch;
-            // Convert to hex string for consistency
-            const oldHex = parseInt(oldValue, oldValue.startsWith("0x") ? 16 : 10).toString(16);
-            const newHex = parseInt(newValue, newValue.startsWith("0x") ? 16 : 10).toString(16);
+            const [, regName, , oldValue, , newValue] = regMatch;
+            const key = canonicalRegisterKey(regName);
+            if (!key) continue;
 
-            console.log(`🔍 Register change detected: ${regName} ${oldHex} -> ${newHex}`);
+            const oldHex = normalizeRegisterValue(oldValue);
+            const newHex = normalizeRegisterValue(newValue);
+
+            console.log(`🔍 Register change detected: ${key} ${oldHex} -> ${newHex}`);
 
             // Only set previousRegisterValues if it's not already set (to preserve step context)
             // During step execution, previousRegisterValues is set at the start of the step
             if (!stepExecutionInProgress) {
-                previousRegisterValues[regName] = oldHex;
+                previousRegisterValues[key] = oldHex;
             }
 
             // Always update register values, even when terminal output is suppressed
-            currentRegisterValues[regName] = newHex;
-
-            console.log(
-                `📊 Previous: ${previousRegisterValues[regName]}, Current: ${currentRegisterValues[regName]}`
-            );
+            currentRegisterValues[key] = newHex;
 
             // Update registers display automatically
             updateRegistersFromCurrentValues();
@@ -3893,13 +3594,27 @@ function parseEmulatorOutputForTrace(chunk) {
     }
 }
 
+// The emulator prints "PROGRAM_EXIT: <reason>" immediately before every exit.
+function handleProgramExit(reason) {
+    if (!ideState.emulatorRunning) return;
+
+    ideState.emulatorRunning = false;
+    currentExecutionLine = null;
+
+    if (monacoEditor && window.currentLineDecorations) {
+        monacoEditor.deltaDecorations(window.currentLineDecorations, []);
+        window.currentLineDecorations = [];
+    }
+
+    updateButtonStates();
+    showNotification(`Program finished (${reason})`, reason === "fault" ? "error" : "info");
+}
+
 window.api.onOutput((chunk) => {
     const textChunk = typeof chunk === "string" ? chunk : String(chunk ?? "");
 
     if (terminal && !suppressTerminalOutput) {
-        // Format the output before displaying
-        const formattedChunk = formatTerminalOutput(textChunk);
-        terminal.write(formattedChunk);
+        terminal.write(textChunk);
     }
 
     const exitMatch = textChunk.match(/\[process exited with code\s*(-?\d+)\]/i);
@@ -3936,31 +3651,7 @@ window.api.onOutput((chunk) => {
         }
     }
 
-    // Parse emulator output for trace information
-    parseEmulatorOutputForTrace(textChunk);
 });
-
-// Format terminal output for better readability
-function formatTerminalOutput(chunk) {
-    if (!chunk) return chunk;
-
-    const normalized = chunk.replace(
-        /\[inst:\s*(\d+)\s+pc:\s*(\d+),\s*src line\s*(\d+)\]/g,
-        "[inst:$1, pc:$2, src:$3]"
-    );
-
-    const lines = normalized.split(/\r?\n/);
-    const filtered = lines.filter((line) => !/^\s*Next:\s*/.test(line));
-
-    // Preserve trailing newline if the original chunk ended with one
-    const endsWithNewline = /\r?\n$/.test(normalized);
-    let result = filtered.join("\n");
-    if (endsWithNewline && (result.length > 0 || filtered.length === 0)) {
-        result += "\n";
-    }
-
-    return result;
-}
 
 // RISC-V Instruction Reference Database
 const riscvInstructions = {
@@ -4784,6 +4475,20 @@ function updateRegistersFromCurrentValues() {
         // previousRegisterValues should only be updated when starting a new step
     }
 
+    const pcValue = currentRegisterValues["pc"] || "0";
+    const previousPc = previousRegisterValues["pc"];
+    const pcChanged = previousPc !== undefined && previousPc !== pcValue;
+
+    html += `<div class="register-item ${
+        pcChanged ? "changed" : ""
+    } reg-role-general" data-register="pc">
+            <span class="reg-name">pc</span>
+            <span class="reg-value ${pcChanged ? "changed" : ""}">${formatNumberByDisplayOption(
+        pcValue
+    )}</span>
+            <span class="reg-alias">pc</span>
+        </div>`;
+
     html += "</div>";
     registersGrid.innerHTML = html;
 
@@ -4935,13 +4640,16 @@ function getInstructionInfo(instructionText) {
     };
 }
 
-// CPUlator-style instruction trace
+// CPUlator-style instruction trace. The per-entry register snapshot was dropped:
+// nothing reads it, and it made every step cost a full 32-entry object copy.
+const TRACE_MAX_ENTRIES = 2000;
+
 function addToTrace(instruction, pc, registers) {
+    const numericPc = Number.isFinite(pc) ? pc >>> 0 : null;
     const traceEntry = {
         timestamp: Date.now(),
-        pc: pc,
+        pc: numericPc,
         instruction: instruction,
-        registers: { ...registers },
         cycle: performanceCounters.cycles++,
     };
 
@@ -4950,7 +4658,9 @@ function addToTrace(instruction, pc, registers) {
     // Detect and log call/return instructions for call stack
     detectCallReturnInstruction(instruction, pc, registers);
 
-    // Keep all entries - no limit (make scrollable instead)
+    if (instructionTrace.length > TRACE_MAX_ENTRIES) {
+        instructionTrace.splice(0, instructionTrace.length - TRACE_MAX_ENTRIES);
+    }
 
     updateTraceDisplay();
     updatePerformanceCounters();
@@ -4988,7 +4698,7 @@ function detectCallReturnInstruction(instruction, pc, registers) {
             (rd === "zero" || rd === "x0" || rd === "x00") &&
             (parts[2] === "ra" || parts[2] === "x1" || parts[2] === "x01")
         ) {
-            const ra = registers["x01"] || registers["x1"] || registers["ra"] || "0";
+            const ra = getRegisterValue(registers, "ra") || "0";
             logCallStackEvent(
                 "return",
                 "ret",
@@ -4998,7 +4708,7 @@ function detectCallReturnInstruction(instruction, pc, registers) {
         }
     } else if (op === "ret" || op === "jr") {
         // ret pseudo-instruction (expands to jalr x0, x1, 0)
-        const ra = registers["x01"] || registers["x1"] || registers["ra"] || "0";
+        const ra = getRegisterValue(registers, "ra") || "0";
         logCallStackEvent(
             "return",
             "ret",
@@ -5012,42 +4722,92 @@ function detectCallReturnInstruction(instruction, pc, registers) {
     }
 }
 
+let lastRenderedTraceCycle = -1;
+
+const TRACE_HEADER_HTML =
+    '<div class="trace-header"><span>Cycle</span><span>PC</span><span>Instruction</span></div>';
+const TRACE_EMPTY_HTML =
+    '<div class="trace-empty">No instructions executed yet. Start the emulator and use step/run commands to see the trace.</div>';
+
+function buildTraceRow(entry) {
+    const row = document.createElement("div");
+    row.className = "trace-entry";
+
+    const cycle = document.createElement("span");
+    cycle.className = "trace-cycle";
+    cycle.textContent = entry.cycle;
+    row.appendChild(cycle);
+
+    const pc = document.createElement("span");
+    pc.className = "trace-pc";
+    pc.textContent =
+        entry.pc === null || entry.pc === undefined
+            ? "0x????????"
+            : `0x${entry.pc.toString(16).padStart(8, "0")}`;
+    row.appendChild(pc);
+
+    const instruction = document.createElement("span");
+    instruction.className = "trace-instruction";
+    instruction.textContent = entry.instruction ?? "";
+    row.appendChild(instruction);
+
+    return row;
+}
+
+// Rows are appended incrementally; rebuilding the whole table on every step was
+// quadratic in the number of executed instructions.
 function updateTraceDisplay() {
     const tracePanel = document.getElementById("trace-content");
     const traceCount = document.getElementById("traceCount");
 
     if (!tracePanel) return;
 
-    // Update instruction count
     if (traceCount) {
         traceCount.textContent = instructionTrace.length;
     }
 
-    let html =
-        '<div class="trace-header"><span>Cycle</span><span>PC</span><span>Instruction</span></div>';
-
-    if (instructionTrace.length === 0) {
-        html +=
-            '<div class="trace-empty">No instructions executed yet. Start the emulator and use step/run commands to see the trace.</div>';
-    } else {
-        // Show all instructions (make scrollable instead of cutting old entries)
-        instructionTrace.forEach((entry, index) => {
-            html += `<div class="trace-entry ${
-                index === instructionTrace.length - 1 ? "current" : ""
-            }">
-                <span class="trace-cycle">${entry.cycle}</span>
-                <span class="trace-pc">0x${entry.pc.toString(16).padStart(8, "0")}</span>
-                <span class="trace-instruction">${entry.instruction}</span>
-            </div>`;
-        });
+    let header = tracePanel.querySelector(".trace-header");
+    if (!header) {
+        tracePanel.innerHTML = TRACE_HEADER_HTML;
+        header = tracePanel.querySelector(".trace-header");
+        lastRenderedTraceCycle = -1;
     }
 
-    tracePanel.innerHTML = html;
+    if (instructionTrace.length === 0) {
+        tracePanel.querySelectorAll(".trace-entry").forEach((node) => node.remove());
+        if (!tracePanel.querySelector(".trace-empty")) {
+            header.insertAdjacentHTML("afterend", TRACE_EMPTY_HTML);
+        }
+        lastRenderedTraceCycle = -1;
+        return;
+    }
+
+    const emptyMessage = tracePanel.querySelector(".trace-empty");
+    if (emptyMessage) emptyMessage.remove();
+
+    const fragment = document.createDocumentFragment();
+    instructionTrace.forEach((entry) => {
+        if (entry.cycle <= lastRenderedTraceCycle) return;
+        fragment.appendChild(buildTraceRow(entry));
+        lastRenderedTraceCycle = entry.cycle;
+    });
+    tracePanel.appendChild(fragment);
+
+    const rows = tracePanel.querySelectorAll(".trace-entry");
+    for (let i = 0; i + TRACE_MAX_ENTRIES < rows.length; i++) {
+        rows[i].remove();
+    }
+    rows.forEach((row) => row.classList.remove("current"));
+    if (rows.length > 0) {
+        rows[rows.length - 1].classList.add("current");
+    }
+
     tracePanel.scrollTop = tracePanel.scrollHeight;
 }
 
+// The authoritative instruction count comes from the emulator's prompt banner
+// (parsed in parseEmulatorOutputForTrace); this only repaints the panel.
 function updatePerformanceCounters() {
-    performanceCounters.instructions++;
     updateStatisticsPanel();
 }
 
@@ -5075,11 +4835,7 @@ function updateStatisticsPanel() {
 
     const statSP = document.getElementById("statSP");
     if (statSP) {
-        const spValue =
-            currentRegisterValues["x02"] ||
-            currentRegisterValues["x2"] ||
-            currentRegisterValues["sp"] ||
-            "0";
+        const spValue = getRegisterValue(currentRegisterValues, "sp") || "0";
         statSP.textContent = `0x${parseInt(spValue, 16)
             .toString(16)
             .padStart(8, "0")
@@ -5324,27 +5080,8 @@ async function refreshCallStackPanel() {
     try {
         console.log("🔍 Refreshing call stack panel...");
 
-        // Try emulator commands first for compatibility
-        let result = await enqueueEmulatorCommand("info stack");
-        if (result.ok && result.output && result.output.trim()) {
-            console.log("✅ Got call stack from 'info stack'");
-            updateCallStackDisplay(result.output);
-            return;
-        }
-
-        // Fallback: try alternative commands
-        const fallbackCommands = ["backtrace", "bt", "where", "stack"];
-        for (const cmd of fallbackCommands) {
-            console.log(`🔍 Trying command: ${cmd}`);
-            result = await enqueueEmulatorCommand(cmd);
-            if (result.ok && result.output && result.output.trim()) {
-                console.log(`✅ Got call stack from '${cmd}'`);
-                updateCallStackDisplay(result.output);
-                return;
-            }
-        }
-
-        // Create enhanced call stack from current state and symbols
+        // The emulator has no backtrace command, and its dispatch is first-character
+        // only, so probing for one would run the user's program (e.g. "stack" -> "s").
         buildCallStackFromCurrentState();
     } catch (error) {
         console.error("Error refreshing call stack:", error);
@@ -5357,12 +5094,12 @@ function buildCallStackFromCurrentState() {
     console.log("🔍 Building call stack from current state");
     const stackEntries = [];
     const currentPC = currentRegisterValues["pc"];
-    const currentSP = currentRegisterValues["sp"];
+    const currentSP = getRegisterValue(currentRegisterValues, "sp");
 
     console.log("Current PC:", currentPC, "Current SP:", currentSP);
 
     if (!currentPC) {
-        updateCallStackDisplay(null);
+        updateCallStackDisplayFromEntries([]);
         return;
     }
 
@@ -5419,71 +5156,6 @@ function buildCallStackFromCurrentState() {
     // Update the call stack display with our constructed stack
     callStack = stackEntries;
     updateCallStackDisplayFromEntries(stackEntries);
-}
-
-function updateSymbolsDisplay(symbolData) {
-    const symbolsContent = document.getElementById("symbolsContent");
-    if (!symbolsContent) return;
-
-    let html = "";
-    if (!symbolData) {
-        symbolsContent.innerHTML = '<div class="empty-message">No symbols available</div>';
-        return;
-    }
-    const lines = symbolData.split("\n");
-
-    lines.forEach((line) => {
-        if (line.trim() && line.includes(" ")) {
-            const trimmedLine = line.trim();
-            const parts = trimmedLine.split(/\s+/);
-
-            if (parts.length >= 3) {
-                // More robust parsing: find symbol name, address, and other fields
-                // Symbol names can contain underscores, so we need to be careful
-                let name,
-                    address,
-                    type,
-                    size = "",
-                    section = "";
-
-                // Look for patterns: name address type [size] [section]
-                // Address should be hex (0x...) or start with digit
-                let addressIndex = -1;
-                for (let i = 0; i < parts.length; i++) {
-                    if (parts[i].match(/^(0x[0-9a-fA-F]+|[0-9]+)$/)) {
-                        addressIndex = i;
-                        break;
-                    }
-                }
-
-                if (addressIndex > 0) {
-                    // Everything before addressIndex is the symbol name
-                    name = parts.slice(0, addressIndex).join("_");
-                    address = parts[addressIndex];
-                    type = parts[addressIndex + 1] || "";
-                    size = parts[addressIndex + 2] || "";
-                    section = parts[addressIndex + 3] || "";
-                } else {
-                    // Fallback to old parsing
-                    [name, address, type, size = "", section = ""] = parts;
-                }
-
-                html += `<div class="symbol-entry">
-                    <span class="symbol-name">${name}</span>
-                    <span class="symbol-address">${address}</span>
-                    <span class="symbol-type">${type}</span>
-                    <span class="symbol-size">${size}</span>
-                    <span class="symbol-section">${section}</span>
-                </div>`;
-            }
-        }
-    });
-
-    if (html) {
-        symbolsContent.innerHTML = html;
-    } else {
-        symbolsContent.innerHTML = '<div class="no-symbols">No symbols available</div>';
-    }
 }
 
 function parseAssemblySymbols(sourceCode) {
@@ -5767,70 +5439,12 @@ function displayInstructionInfo(instructionName) {
     showNotification(`Loaded documentation for ${instruction.name}`, "success");
 }
 
-// CPUlator-style conditional breakpoints
-function addConditionalBreakpoint(lineNumber, condition = null) {
-    const breakpoint = {
-        line: lineNumber,
-        condition: condition,
-        enabled: true,
-        hitCount: 0,
-    };
-
-    // Store in enhanced breakpoint system
-    conditionalBreakpoints.set(lineNumber, breakpoint);
-
-    // Visual update in editor
-    updateBreakpointDecorations();
-
-    showNotification(
-        condition
-            ? `Conditional breakpoint set at line ${lineNumber}: ${condition}`
-            : `Breakpoint set at line ${lineNumber}`,
-        "success"
-    );
-}
-
 // Call Stack panel functionality
 let callStack = [];
 let callStackLog = []; // Logs all call/return events for history
 
 // Global symbols storage for cross-panel access
 let globalAssemblySymbols = [];
-
-function updateCallStackDisplay(stackOutput) {
-    if (!stackOutput) {
-        updateCallStackDisplayFromEntries([]);
-        return;
-    }
-
-    const lines = stackOutput.split("\n");
-    let stackEntries = [];
-
-    lines.forEach((line) => {
-        const trimmedLine = line.trim();
-        if (trimmedLine && !trimmedLine.startsWith("#") && trimmedLine.includes(":")) {
-            // Try to parse stack frame information
-            const match = trimmedLine.match(/(\w+)\s*@\s*(0x[0-9a-fA-F]+)(?:\s+.*line\s+(\d+))?/);
-            if (match) {
-                const [, funcName, address, srcLine] = match;
-                stackEntries.push({
-                    function: funcName || "unknown",
-                    address: address,
-                    returnAddr: address,
-                    srcLine: srcLine || "?",
-                });
-            }
-        }
-    });
-
-    if (stackEntries.length === 0) {
-        // If no parsed entries, use buildCallStackFromCurrentState
-        buildCallStackFromCurrentState();
-        return;
-    }
-
-    updateCallStackDisplayFromEntries(stackEntries);
-}
 
 // Add call/return event to log
 function logCallStackEvent(type, functionName, address, returnAddr) {

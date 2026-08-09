@@ -1,14 +1,19 @@
-#include <cstdint>
-#include <cstdint>
-
 #ifndef CACHESIM_H__
 #define CACHESIM_H__
 
-// Change these to configure the cache.
+#include <cstdint>
+
+// Size of the emulated address space, shared with the emulator so the memory
+// accessors and the ISA agree on what is in range.
+#define MEM_ARENA_BYTES 0x20000
+
+// Change these to configure the cache. This header is the only place they are
+// defined; cachesim.cpp used to redefine them, which silently overrode any
+// change made here.
 // Values are logarithmic, so CACHE_WAYS_SZ of 0 results in 1 way!
-#define CACHE_SETS_SZ 8
-#define CACHE_WAYS_SZ 0
-#define CACHE_LINE_WORD_SZ 0
+#define CACHE_SETS_SZ 8       // 2^8 = 256 sets
+#define CACHE_WAYS_SZ 3       // 2^3 = 8 ways
+#define CACHE_LINE_WORD_SZ 4  // 2^4 = 16 words per line (64 bytes)
 
 //extern uint32_t g_cache[CACHE_SETS][CACHE_WAYS][CACHE_LINE_WORD];
 //extern uint32_t g_tags[CACHE_SETS][CACHE_WAYS];

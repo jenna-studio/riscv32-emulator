@@ -4,11 +4,16 @@
 #include <cstdint>
 #include <vector>
 #include <map>
+#include <new>
+#include <cerrno>
 #include "cachesim.h"
 // #include "linenoise.hpp" // Temporarily disabled due to corruption
 
-// 64 KB
-#define MEM_BYTES 0x10000
+// 128 KB, defined in cachesim.h so the memory accessors share it. The stack
+// grows down from STACK_TOP; programs also use STACK_TOP itself as a
+// memory-mapped result marker, so the arena has to extend past it.
+#define MEM_BYTES MEM_ARENA_BYTES
+#define STACK_TOP 0x10000
 #define TEXT_OFFSET 0
 #define DATA_OFFSET 32768
 
@@ -28,8 +33,10 @@ bool streq(char* s, const char* q) {
 }
 
 uint32_t signextend(uint32_t in, int bits) {
-    if ( in & (1<<(bits-1)) )
-        return ((-1)<<bits)|in;
+    if ( bits >= 32 )
+        return in;
+    if ( in & (1u<<(bits-1)) )
+        return (~0u << bits) | in;
     return in;
 }
 
@@ -113,10 +120,12 @@ void print_regfile(uint32_t* rf) {
     }
 }
 
-void print_syntax_error(int line, const char* msg) {
+[[noreturn]] void print_syntax_error(int line, const char* msg) {
     printf( "Syntax error at line %d: %s\n", line, msg );
     exit(3);
 }
+
+int parse_reg(char* tok, int line, bool strict = true);
 
 void parse_mem(char* in, int* reg, uint32_t* imm, int bits, int line) {
     char* lpar = strchr(in, '(');
@@ -129,7 +138,7 @@ void parse_mem(char* in, int* reg, uint32_t* imm, int bits, int line) {
     *rpar = 0;
 
     *imm = signextend(strtol(in, NULL, 0), bits);
-    *reg = atoi(lpar+2);
+    *reg = parse_reg(lpar+1, line);
 }
 
 instr_type parse_instr(char* tok) {
@@ -189,15 +198,16 @@ instr_type parse_instr(char* tok) {
     return UNIMPL;
 }
 
-int parse_reg(char* tok, int line, bool strict = true) {
+int parse_reg(char* tok, int line, bool strict) {
     if ( tok[0] == 'x' ) {
-        int ri = atoi(tok+1);
-        if ( ri < 0 || ri > 32 ) {
+        char* end = NULL;
+        long ri = strtol(tok+1, &end, 10);
+        if ( end == tok+1 || *end != '\0' || ri < 0 || ri > 31 ) {
             if ( strict )
                 print_syntax_error(line, "Malformed register name");
             return -1;
         }
-        return ri;
+        return (int)ri;
     }
 
     if ( streq(tok, "zero") ) return 0;
@@ -239,46 +249,71 @@ int parse_reg(char* tok, int line, bool strict = true) {
 }
 
 uint32_t parse_imm(char* tok, int bits, int line, bool strict = true) {
-    if ( !(tok[0]>='0'&&tok[0]<='9') && tok[0] != '-' && strict) {
-        print_syntax_error(line, "Malformed immediate value" );
+    char* p = tok;
+    char* end = NULL;
+    if ( *p == '+' ) p++;
+
+    errno = 0;
+    long int imml = strtol(p, &end, 0);
+
+    // Reject empty input and trailing garbage rather than silently truncating.
+    if ( end == p || *end != '\0' ) {
+        if ( strict )
+            print_syntax_error(line, "Malformed immediate value" );
+        return (uint32_t)imml;
     }
-    long int imml = strtol(tok, NULL, 0);
-    if (imml > ((1<<(bits-1))-1) || imml < -(1<<(bits-1))) {
+    if ( errno == ERANGE || imml > ((1L<<(bits-1))-1) || imml < -(1L<<(bits-1)) ) {
         if ( strict )
             print_syntax_error(line, "Immediate value out of range");
     }
-    return imml;
+    return (uint32_t)imml;
+}
+
+// lui/auipc take a 20-bit field that is conventionally written unsigned, so
+// accept both 0..0xfffff and the signed spelling, as GNU as does.
+uint32_t parse_imm_upper(char* tok, int line) {
+    char* p = tok;
+    char* end = NULL;
+    if ( *p == '+' ) p++;
+
+    errno = 0;
+    long int imml = strtol(p, &end, 0);
+
+    if ( end == p || *end != '\0' ) {
+        print_syntax_error(line, "Malformed immediate value" );
+        return 0;
+    }
+    if ( errno == ERANGE || imml > 0xfffffL || imml < -(1L<<19) ) {
+        print_syntax_error(line, "Immediate value out of range");
+    }
+    return ((uint32_t)imml) & 0xfffff;
 }
 
 void append_source(char* ftok, char* o1, char* o2, char* o3, source* src, instr* i) {
-    int slen = strlen(ftok);
     char tbuf[256];
-    int tboff = 0;
-    if ( o1 ) slen += strlen(o1);
-    if ( o2 ) slen += strlen(o2);
-    if ( o3 ) slen += strlen(o3);
-    slen += 4; // spaces
 
     if ( o3 ) {
-        tboff = sprintf(tbuf, "%s %s, %s, %s", ftok, o1, o2, o3);
+        snprintf(tbuf, sizeof(tbuf), "%s %s, %s, %s", ftok, o1, o2, o3);
     } else if ( o2 ) {
-        tboff = sprintf(tbuf, "%s %s, %s", ftok, o1, o2);
+        snprintf(tbuf, sizeof(tbuf), "%s %s, %s", ftok, o1, o2);
     } else if ( o1 ) {
-        tboff = sprintf(tbuf, "%s %s", ftok, o1);
+        snprintf(tbuf, sizeof(tbuf), "%s %s", ftok, o1);
     } else {
-        tboff = sprintf(tbuf, "%s", ftok);
+        snprintf(tbuf, sizeof(tbuf), "%s", ftok);
     }
 
-    if ( src->offset < MAX_SRC_LEN ) {
+    size_t tlen = strlen(tbuf);
+    // Need room for an optional leading newline, the text, and its terminator.
+    if ( src->offset + (int)tlen + 2 <= MAX_SRC_LEN ) {
         // Add newline before this instruction if src buffer is not empty
         if ( src->offset > 0 ) {
             src->src[src->offset] = '\n';
             src->offset += 1;
         }
-        strncpy(src->src+src->offset, tbuf, strlen(tbuf));
-        src->src[src->offset + strlen(tbuf)] = '\0';  // Add null terminator
+        memcpy(src->src+src->offset, tbuf, tlen);
+        src->src[src->offset + tlen] = '\0';
         i->psrc = src->src+src->offset;
-        src->offset += strlen(tbuf) + 1;  // Use actual string length for offset
+        src->offset += (int)tlen + 1;
     }
 }
 
@@ -302,9 +337,12 @@ int parse_data_element(int line, int size, uint8_t* mem, int offset) {
         errno = 0;
         int64_t v = strtol(t, NULL, 0);
         int64_t vs = (v>>(size*8));
-        if ( errno == ERANGE || (vs > 0 && vs != -1 ) ) {
+        if ( errno == ERANGE || (vs != 0 && vs != -1 ) ) {
             printf( "Value out of bounds at line %d : %s\n", line, t);
             exit(2);
+        }
+        if ( offset < 0 || size > MEM_BYTES - offset ) {
+            print_syntax_error(line, "Data does not fit in memory");
         }
         //printf ( "parse_data_element %d: %d %ld %d %d\n", line, size, v, errno, sizeof(long int));
         memcpy(&mem[offset], &v, size);
@@ -316,32 +354,74 @@ int parse_data_element(int line, int size, uint8_t* mem, int offset) {
 
 int parse_data_zero(int line, uint8_t* mem, int offset) {
     char* t = strtok(NULL, " \t\r\n");
-    int bytes = atoi(t);
+    if ( !t ) {
+        print_syntax_error(line, "Missing byte count");
+    }
+    int bytes = (int)parse_imm(t, 31, line);
+    if ( bytes < 0 || offset < 0 || bytes > MEM_BYTES - offset ) {
+        print_syntax_error(line, "Data does not fit in memory");
+    }
     memset(&mem[offset], 0, bytes);
     return offset + bytes;
 }
 
+// Directives that carry no meaning for this emulator but appear routinely in
+// compiler output. Accepted and skipped rather than reported as errors.
+static bool is_ignorable_directive(char* d) {
+    return streq(d, ".globl") || streq(d, ".global") || streq(d, ".local")
+        || streq(d, ".section") || streq(d, ".type") || streq(d, ".size")
+        || streq(d, ".file") || streq(d, ".ident") || streq(d, ".attribute")
+        || streq(d, ".option") || streq(d, ".cfi_startproc") || streq(d, ".cfi_endproc");
+}
+
 int parse_assembler_directive(int line, char* ftok, uint8_t* mem, int memoff) {
     //printf( "assembler directive %s\n", ftok );
-    if ( 0 == memcmp(ftok, ".text", strlen(ftok) ) ) {
+    // Section cursors, so returning to a section resumes where it left off
+    // instead of overwriting it from the start.
+    static int text_off = TEXT_OFFSET;
+    static int data_off = DATA_OFFSET;
+    static bool in_text = true;
+
+    if ( in_text ) text_off = memoff; else data_off = memoff;
+
+    if ( streq(ftok, ".text") ) {
         if (strtok(NULL, " \t\r\n")) {
             print_syntax_error(line, "Tokens after assembler directive");
         }
-        //cur_section = SECTION_TEXT;
-        memoff = TEXT_OFFSET;
-        //printf( "starting text section\n" );
-    } else if ( 0 == memcmp(ftok, ".data", strlen(ftok) ) ) {
-        //cur_section = SECTION_TEXT;
-        memoff = DATA_OFFSET;
-        //printf( "starting data section\n" );
-    } else if ( 0 == memcmp(ftok, ".byte", strlen(ftok)) ) memoff = parse_data_element(line, 1, mem, memoff);
-    else if ( 0 == memcmp(ftok, ".half", strlen(ftok)) ) memoff = parse_data_element(line, 2, mem, memoff);
-    else if ( 0 == memcmp(ftok, ".word", strlen(ftok)) ) memoff = parse_data_element(line, 4, mem, memoff);
-    else if ( 0 == memcmp(ftok, ".zero", strlen(ftok)) ) memoff = parse_data_zero(line, mem, memoff);
+        in_text = true;
+        memoff = text_off;
+    } else if ( streq(ftok, ".data") ) {
+        in_text = false;
+        memoff = data_off;
+    }
+    else if ( streq(ftok, ".byte") ) memoff = parse_data_element(line, 1, mem, memoff);
+    else if ( streq(ftok, ".half") ) memoff = parse_data_element(line, 2, mem, memoff);
+    else if ( streq(ftok, ".word") ) memoff = parse_data_element(line, 4, mem, memoff);
+    else if ( streq(ftok, ".zero") || streq(ftok, ".space") || streq(ftok, ".skip") )
+        memoff = parse_data_zero(line, mem, memoff);
+    else if ( streq(ftok, ".align") || streq(ftok, ".p2align") || streq(ftok, ".balign") ) {
+        char* atok = strtok(NULL, " \t\r\n");
+        if ( !atok ) {
+            print_syntax_error(line, "Missing alignment argument");
+        }
+        int n = (int)parse_imm(atok, 16, line);
+        // .balign takes a byte count; .align/.p2align take an exponent.
+        int align = streq(ftok, ".balign") ? n : (1 << n);
+        if ( align <= 0 || align > MEM_BYTES ) {
+            print_syntax_error(line, "Invalid alignment");
+        }
+        if ( memoff % align ) memoff += align - (memoff % align);
+    }
+    else if ( is_ignorable_directive(ftok) ) {
+        // consume the rest of the line
+        while ( strtok(NULL, " \t\r\n") ) ;
+    }
     else {
         printf( "Undefined assembler directive at line %d: %s\n", line, ftok );
-        //exit(3);
+        exit(3);
     }
+
+    if ( in_text ) text_off = memoff; else data_off = memoff;
     return memoff;
 }
 
@@ -632,7 +712,8 @@ int parse_instr(int line, char* ftok, instr* imem, int memoff, label_loc* labels
 
         switch( op ) {
             case UNIMPL:
-                return 1;
+                printf( "Unknown instruction at line %d: %s\n", line, ftok );
+                exit(3);
             case JAL:
                 if ( o2 ) { // two operands, reg, label
                     if ( !o1 || !o2 || o3 || o4 ) print_syntax_error( line, "Invalid format" );
@@ -682,7 +763,7 @@ int parse_instr(int line, char* ftok, instr* imem, int memoff, label_loc* labels
                 // how to deal with LSB correctly? FIXME
                 if ( !o1 || !o2 || o3 || o4 ) print_syntax_error( line, "Invalid format" );
                 i->a1.reg = parse_reg(o1, line);
-                i->a2.imm = (parse_imm(o2, 20, line));
+                i->a2.imm = parse_imm_upper(o2, line);
                 return 1;
             case HCF:
                 return 1;
@@ -762,6 +843,23 @@ void parse(FILE* fin, uint8_t* mem, instr* imem, int& memoff, label_loc* labels,
     }
 }
 
+// Returns false and reports the offending instruction when a data access would
+// leave the 64 KB address space or is misaligned for its width.
+static bool check_data_access(const char* kind, uint32_t addr, uint32_t size,
+                              uint32_t pc, int src_line) {
+    if ( addr >= MEM_BYTES || size > MEM_BYTES - addr ) {
+        printf( "FAULT: %s of %u byte(s) at 0x%08x is outside the 0x0-0x%05x address space (pc=%d, src=%d)\n",
+                kind, size, addr, MEM_BYTES-1, pc, src_line );
+        return false;
+    }
+    if ( size > 1 && (addr % size) != 0 ) {
+        printf( "FAULT: misaligned %u-byte %s at 0x%08x (pc=%d, src=%d)\n",
+                size, kind, addr, pc, src_line );
+        return false;
+    }
+    return true;
+}
+
 void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool start_immediate) {
     uint32_t rf[32];
     uint32_t rf_mirror[32];
@@ -773,13 +871,24 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
         rf_mirror[i] = 0;
     }
 
+    // Stack grows down from STACK_TOP; programs may override this.
+    rf[2] = STACK_TOP;
+    rf_mirror[2] = rf[2];
+
     bool stepping = !start_immediate;
     int stepcnt = 0;
-    char keybuf[128];
-    char* kbp = keybuf;
+    char keybuf[128] = {0};
     bool dexit = false;
+    bool faulted = false;
+    const char* exit_reason = "halted";
     while(!dexit) {
         uint32_t iid = pc/4;
+        if ( iid >= DATA_OFFSET/4 ) {
+            printf( "FAULT: pc 0x%08x is outside the text segment (0x0-0x%05x)\n",
+                    pc, DATA_OFFSET-1 );
+            faulted = true;
+            break;
+        }
         instr i = imem[iid];
         inst_cnt ++;
 
@@ -787,23 +896,31 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
             // Only enter debug loop if we're not in the middle of executing steps
             if ( stepcnt == 0 || i.breakpoint ) {
                 stepping = true;
+                // A breakpoint can fire part way through an "sN" run; the leftover
+                // budget must not survive into the next continue.
+                stepcnt = 0;
                 printf( "\n" );
 
                 while (true) {
+                    bool handled = false;
                     printf( "[inst: %4d, pc: %4d, src: %4d]\n", inst_cnt, pc, i.orig_line );
                     printf(">> ");
                     fflush(stdout);
                     // Use standard fgets instead of linenoise
-                    fgets(keybuf, 128, stdin);
+                    if ( !fgets(keybuf, sizeof(keybuf), stdin) ) {
+                        printf( "\nEnd of input on stdin.\n" );
+                        printf( "PROGRAM_EXIT: quit\n" );
+                        fflush(stdout);
+                        exit(0);
+                    }
 
-                    //while ((kbp = linenoise?::Readline(">> ")) == NULL);
-                    //fgets(keybuf, 128, stdin);
-                    for ( int i = 0; i < strlen(keybuf); i++ )
-                        if (keybuf[i] == '\n')
-                            keybuf[i] = '\0';
+                    // Strip the line terminator, CR as well as LF so CRLF input works.
+                    keybuf[strcspn(keybuf, "\r\n")] = '\0';
 
                     if ( keybuf[0] == 'q' ) {
                         printf( "Quit command input! Exiting...\n" );
+                        printf( "PROGRAM_EXIT: quit\n" );
+                        fflush(stdout);
                         exit(0);
                     }
                     if ( keybuf[0] == 'c' ) {
@@ -817,12 +934,19 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                         if ( strlen(keybuf+1) == 0 ) {
                             stepcnt = 1;  // Default to 1 step if no number provided
                         } else {
-                            stepcnt = parse_imm(keybuf+1, 16, 0, false);
+                            char* send = NULL;
+                            long n = strtol(keybuf+1, &send, 0);
+                            if ( send == keybuf+1 || *send != '\0' || n <= 0 ) {
+                                printf( "Invalid step count: %s\n", keybuf+1 );
+                                continue;
+                            }
+                            stepcnt = (int)n;
                         }
                         stepping = false;  // Exit stepping mode to execute the steps
                         break;
                     }
                     if ( keybuf[0] == 'b' ) {
+                        handled = true;
                         // todo breakpoint!
                         if ( strlen(keybuf+1) == 0 ) {
                             for ( int i = 0; i < DATA_OFFSET/4; i++ ) {
@@ -850,6 +974,7 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                     }
                     if ( keybuf[0] == 'B' ) {
                         // breakpoint remove
+                        handled = true;
                         uint32_t break_line = parse_imm(keybuf+1, 16, 0, false);
                         bool breakpoint_removed = false;
                         for ( int i = 0; i < DATA_OFFSET/4; i++ ) {
@@ -865,6 +990,7 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                         }
                     }
                     if ( keybuf[0] == 'r' ) {
+                        handled = true;
                         int reg = parse_reg(keybuf+1, 0, false);
                         if ( reg >= 0 )
                             printf( "rf[%2d] = 0x%x\n", reg, rf[reg] );
@@ -872,22 +998,37 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                             print_regfile(rf);
                     }
                     if ( keybuf[0] == 'm' ) {
-                        uint32_t addr = parse_imm(keybuf+1, 31, 0, false); // just for simplicity
-                        int cnt = 1;
-                        char* ftok = strtok(keybuf, " \t\r\n");
-                        ftok = strtok(NULL, " \t\r\n");
-                        if ( ftok ) {
-                            cnt = parse_imm(ftok, 16, 0, false);
-                        }
-                        for ( int w = 0; w < cnt; w++ ) {
-                            printf( "0x%04x: ", addr+(w*4) );
-                            for ( int i = 0; i < 4; i++ ) {
-                                printf( "%02x ", mem[addr+(w*4)+i] );
+                        // Accepts both "m0x1000 16" and "m 0x1000 16"; the count is in words.
+                        handled = true;
+                        char* mp = keybuf + 1;
+                        while ( *mp == ' ' || *mp == '\t' ) mp++;
+                        char* addr_tok = strtok(mp, " \t");
+                        char* cnt_tok = strtok(NULL, " \t");
+
+                        if ( !addr_tok ) {
+                            printf( "Usage: m<addr> [word count]\n" );
+                        } else {
+                            uint32_t addr = parse_imm(addr_tok, 31, 0, false) & ~0x3u;
+                            int cnt = cnt_tok ? parse_imm(cnt_tok, 16, 0, false) : 1;
+                            if ( cnt < 1 ) cnt = 1;
+                            if ( addr >= MEM_BYTES ) {
+                                printf( "Address 0x%x is outside the 0x0-0x%05x address space\n",
+                                        addr, MEM_BYTES-1 );
+                            } else {
+                                if ( (uint32_t)cnt > (MEM_BYTES - addr)/4 )
+                                    cnt = (MEM_BYTES - addr)/4;
+                                for ( int w = 0; w < cnt; w++ ) {
+                                    printf( "0x%04x: ", addr+(w*4) );
+                                    for ( int i = 0; i < 4; i++ ) {
+                                        printf( "%02x ", mem[addr+(w*4)+i] );
+                                    }
+                                    printf( "\n" );
+                                }
                             }
-                            printf( "\n" );
                         }
                     }
                     if ( keybuf[0] == 'd' || strncmp(keybuf, "disassemble", 11) == 0 ) {
+                        handled = true;
                         char* addr_str = keybuf + 1;
                         if (strncmp(keybuf, "disassemble", 11) == 0) addr_str = keybuf + 11;
                         while (*addr_str == ' ' || *addr_str == '\t') addr_str++;
@@ -906,7 +1047,7 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                         for ( int w = 0; w < cnt; w++ ) {
                             uint32_t current_addr = start_addr + (w * 4);
                             uint32_t current_index = current_addr / 4;
-                            if (current_addr < sizeof(mem)) {
+                            if (current_addr + 3 < MEM_BYTES) {
                                 uint32_t opcode = 0;
                                 for (int i = 0; i < 4; i++) {
                                     opcode |= (mem[current_addr + i] & 0xFF) << (i * 8);
@@ -920,7 +1061,8 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                         }
                     }
                     if ( keybuf[0] == 'l' ) {
-                        printf( "Listing compiled isntructions\n" );
+                        handled = true;
+                        printf( "Listing compiled instructions\n" );
                         printf( " srcline : Compiled instruction\n" );
                         uint32_t current_iid = pc/4;
                         for ( int i = 0; i < DATA_OFFSET/4; i++ ) {
@@ -935,6 +1077,23 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                             printf( "CURRENT_LINE: %d\n", imem[current_iid].orig_line );
                         }
                     }
+                    if ( keybuf[0] == 'h' || keybuf[0] == '?' ) {
+                        handled = true;
+                        printf( "Commands:\n" );
+                        printf( "  <enter>      step one instruction\n" );
+                        printf( "  s [N]        step N instructions (default 1)\n" );
+                        printf( "  c            continue to the next breakpoint or exit\n" );
+                        printf( "  b[line]      set a breakpoint, or list them with no argument\n" );
+                        printf( "  B<line>      remove a breakpoint\n" );
+                        printf( "  r[reg]       dump the register file, or one register\n" );
+                        printf( "  m<addr> [n]  dump n words of memory\n" );
+                        printf( "  d<addr> [n]  disassemble n instructions\n" );
+                        printf( "  l            list the compiled source\n" );
+                        printf( "  q            quit\n" );
+                    }
+                    if ( !handled ) {
+                        printf( "Unknown command: %s\n", keybuf );
+                    }
                 }
             }
         }
@@ -944,13 +1103,13 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
             case ADD: rf[i.a1.reg] = rf[i.a2.reg] + rf[i.a3.reg]; break;
             case SUB: rf[i.a1.reg] = rf[i.a2.reg] - rf[i.a3.reg]; break;
             case SLT: rf[i.a1.reg] = (*(int32_t*)&rf[i.a2.reg]) < (*(int32_t*)&rf[i.a3.reg]) ? 1 : 0; break;
-            case SLTU: rf[i.a1.reg] = rf[i.a2.reg] + rf[i.a3.reg]; break;
+            case SLTU: rf[i.a1.reg] = rf[i.a2.reg] < rf[i.a3.reg] ? 1 : 0; break;
             case AND: rf[i.a1.reg] = rf[i.a2.reg] & rf[i.a3.reg]; break;
             case OR: rf[i.a1.reg] = rf[i.a2.reg] | rf[i.a3.reg]; break;
             case XOR: rf[i.a1.reg] = rf[i.a2.reg] ^ rf[i.a3.reg]; break;
-            case SLL: rf[i.a1.reg] = rf[i.a2.reg] << rf[i.a3.reg]; break;
-            case SRL: rf[i.a1.reg] = rf[i.a2.reg] >> rf[i.a3.reg]; break;
-            case SRA: rf[i.a1.reg] = (*(int32_t*)&rf[i.a2.reg]) >> rf[i.a3.reg]; break;
+            case SLL: rf[i.a1.reg] = rf[i.a2.reg] << (rf[i.a3.reg] & 0x1f); break;
+            case SRL: rf[i.a1.reg] = rf[i.a2.reg] >> (rf[i.a3.reg] & 0x1f); break;
+            case SRA: rf[i.a1.reg] = (*(int32_t*)&rf[i.a2.reg]) >> (rf[i.a3.reg] & 0x1f); break;
 
             case ADDI: rf[i.a1.reg] = rf[i.a2.reg] + i.a3.imm; break;
             case SLTI: rf[i.a1.reg] = (*(int32_t*)&rf[i.a2.reg]) < (*(int32_t*)&(i.a3.imm)) ? 1 : 0; break;
@@ -958,13 +1117,18 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
             case ANDI: rf[i.a1.reg] = rf[i.a2.reg] & i.a3.imm; break;
             case ORI: rf[i.a1.reg] = rf[i.a2.reg] | i.a3.imm; break;
             case XORI: rf[i.a1.reg] = rf[i.a2.reg] ^ i.a3.imm; break;
-            case SLLI: rf[i.a1.reg] = rf[i.a2.reg] << i.a3.imm; break;
-            case SRLI: rf[i.a1.reg] = rf[i.a2.reg] >> i.a3.imm; break;
-            case SRAI: rf[i.a1.reg] = (*(int32_t*)&rf[i.a2.reg]) >> i.a3.imm; break;
+            case SLLI: rf[i.a1.reg] = rf[i.a2.reg] << (i.a3.imm & 0x1f); break;
+            case SRLI: rf[i.a1.reg] = rf[i.a2.reg] >> (i.a3.imm & 0x1f); break;
+            case SRAI: rf[i.a1.reg] = (*(int32_t*)&rf[i.a2.reg]) >> (i.a3.imm & 0x1f); break;
 
             case LB: case LBU: case LH: case LHU: case LW: {
                 uint32_t addr = rf[i.a2.reg] + i.a3.imm;
                 uint32_t size = load_store_size(i.op);
+                if ( !check_data_access("load", addr, size, pc, i.orig_line) ) {
+                    faulted = true;
+                    dexit = true;
+                    break;
+                }
                 uint32_t raw = mem_read(mem, addr, size);
                 rf[i.a1.reg] = apply_load_extension(i.op, raw);
                 break;
@@ -972,6 +1136,11 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
             case SB: case SH: case SW: {
                 uint32_t addr = rf[i.a2.reg] + i.a3.imm;
                 uint32_t size = load_store_size(i.op);
+                if ( !check_data_access("store", addr, size, pc, i.orig_line) ) {
+                    faulted = true;
+                    dexit = true;
+                    break;
+                }
                 mem_write(mem, addr, rf[i.a1.reg], size);
                 break;
             }
@@ -989,7 +1158,13 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
             case BNE: if ( rf[i.a1.reg] != rf[i.a2.reg] ) pc_next = i.a3.imm; break;
 
             case JAL: rf[i.a1.reg] = pc + 4; pc_next = i.a2.imm; /*printf( "jal %d %x\n", pc+4, pc_next );*/ break;
-            case JALR: rf[i.a1.reg] = pc + 4; pc_next = rf[i.a2.reg] + i.a3.imm; /*printf( "jalr %d %d(%d)\n", i.a1.reg, i.a3.imm, i.a2.reg );*/ break;
+            case JALR: {
+                // Target must be read before rd is written; "jalr ra, 0(ra)" has rd == rs1.
+                uint32_t target = (rf[i.a2.reg] + i.a3.imm) & ~1u;
+                rf[i.a1.reg] = pc + 4;
+                pc_next = target;
+                break;
+            }
 
             case AUIPC: rf[i.a1.reg] = pc + (i.a2.imm<<12); /*printf( "auipc %x \n", rf[i.a1.reg] );*/ break;
             case LUI: rf[i.a1.reg] = (i.a2.imm<<12); /*printf( "lui %x \n", rf[i.a1.reg] );*/ break;
@@ -997,10 +1172,10 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
             case HCF:
                 printf( "\n\n----------\n\n" );
                 printf( "Reached Halt and Catch Fire instruction!\n" );
-                printf( "inst: %4d, pc: %4d, src: %4d\n", inst_cnt, pc, i.orig_line );
+                printf( "[inst: %4d, pc: %4d, src: %4d]\n", inst_cnt, pc, i.orig_line );
                 print_regfile(rf);
-                printf( "Cache read %d/%d Cache write %d/%d\n", cache_read_hits, mem_read_reqs, cache_write_hits, mem_write_reqs );
-                printf( "Cache flush words: %d\n", mem_flush_words);
+                printf( "Instructions retired: %d\n", inst_cnt );
+                printf( "Memory reads: %d  Memory writes: %d\n", mem_read_reqs, mem_write_reqs );
                 dexit = true;
                 break;
 
@@ -1009,8 +1184,9 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
                 printf( "Reached an unimplemented instruction!\n" );
                 if ( i.psrc )
                     printf( "Instruction: %s\n", i.psrc );
-                printf( "inst: %4d, pc: %4d, src: %4d\n", inst_cnt, pc, i.orig_line );
+                printf( "[inst: %4d, pc: %4d, src: %4d]\n", inst_cnt, pc, i.orig_line );
                 print_regfile(rf);
+                exit_reason = "unimplemented";
                 dexit = true;
                 break;
         }
@@ -1042,6 +1218,11 @@ void execute(uint8_t* mem, instr* imem, label_loc* labels, int label_count, bool
         //printf( "reg dst %d -> %x %d\n", i.a1.reg, rf[i.a1.reg], rf[i.a1.reg] );
         fflush(stdout);
     }
+
+    if ( faulted )
+        exit_reason = "fault";
+    printf( "PROGRAM_EXIT: %s\n", exit_reason );
+    fflush(stdout);
 }
 
 void normalize_labels(instr* imem, label_loc* labels, int label_count, source* src) {
@@ -1068,16 +1249,19 @@ void normalize_labels(instr* imem, label_loc* labels, int label_count, source* s
                     append_source("lui", areg, immu, NULL, src, ii);
                     break;
                 }
-                case JAL:
+                case JAL: {
+                    // jal keeps its target in a2, which is the operand this
+                    // block just resolved.
                     int pc = (i*4);
-                    int target = ii->a3.imm;
+                    int target = ii->a2.imm;
                     int diff = pc - target;
                     if ( diff < 0 ) diff = -diff;
-                    if ( diff >= (1<<21) ) {
-                        printf( "JAL instruction target out of bounds\n" );
+                    if ( diff >= (1<<20) ) {
+                        printf( "JAL instruction target out of bounds at line %d\n", ii->orig_line );
                         exit(3);
                     }
                     break;
+                }
             }
         }
         if ( ii->a3.type == OPTYPE_LABEL ) {
@@ -1101,8 +1285,8 @@ void normalize_labels(instr* imem, label_loc* labels, int label_count, source* s
                     int target = ii->a3.imm;
                     int diff = pc - target;
                     if ( diff < 0 ) diff = -diff;
-                    if ( diff >= (1<<13) ) {
-                        printf( "Branch instruction target out of bounds\n" );
+                    if ( diff >= (1<<12) ) {
+                        printf( "Branch instruction target out of bounds at line %d\n", ii->orig_line );
                         exit(3);
                     }
                     break;
@@ -1132,7 +1316,7 @@ int main(int argc, char** argv) {
     //ProcessorState* ps = new ProcessorState();
     int memoff = 0;
     uint8_t* mem = (uint8_t*)malloc(MEM_BYTES);
-    instr* imem = (instr*)malloc(DATA_OFFSET*sizeof(instr)/4);
+    instr* imem = new (std::nothrow) instr[DATA_OFFSET/4];
     label_loc* labels = (label_loc*)malloc(MAX_LABEL_COUNT*sizeof(label_loc));
     int label_count = 0;
     source src;
@@ -1144,12 +1328,7 @@ int main(int argc, char** argv) {
         exit(2);
     }
 
-    for ( int i = 0; i < DATA_OFFSET/4; i++ ) {
-        imem[i].op = UNIMPL;
-        imem[i].a1.type = OPTYPE_NONE;
-        imem[i].a2.type = OPTYPE_NONE;
-        imem[i].a3.type = OPTYPE_NONE;
-    }
+    memset(mem, 0, MEM_BYTES);
 
     parse(fin, mem, imem, memoff, labels, label_count, &src);
     normalize_labels(imem, labels, label_count, &src);

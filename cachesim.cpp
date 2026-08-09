@@ -2,14 +2,11 @@
 #include <stdio.h>
 #include <stdint.h>
 
-// Cache configuration
-#define CACHE_SETS_SZ 8 // 2^8 = 256 sets
-#define CACHE_WAYS_SZ 3 // 2^3 = 8 ways
-#define CACHE_LINE_WORD_SZ 4 // 2^4 = 16 words per cache line (64 bytes)
-
-#define CACHE_SETS (1 << CACHE_SETS_SZ)
-#define CACHE_WAYS (1 << CACHE_WAYS_SZ)
-#define CACHE_LINE_WORD (1 << CACHE_LINE_WORD_SZ)
+// The cache geometry comes from cachesim.h.
+//
+// NOTE: cache_read/cache_write below are not wired into the emulator's data
+// path -- mem_read/mem_write access the byte array directly. Until they are,
+// g_cache_hits/g_cache_misses only move if something calls them explicitly.
 
 // Cache data storage
 uint32_t g_cache[CACHE_SETS][CACHE_WAYS][CACHE_LINE_WORD] = {0};
@@ -115,9 +112,16 @@ void cache_print_stats() {
     }
 }
 
-// Memory interface functions for emulator compatibility
+// Memory interface functions for emulator compatibility.
+// The emulator validates addresses before calling these; the checks here are a
+// backstop so a bad caller cannot walk off the arena.
 uint32_t mem_read(uint8_t* mem, uint32_t addr, uint32_t size) {
     mem_read_reqs++;
+
+    if ( addr >= MEM_ARENA_BYTES || size > MEM_ARENA_BYTES - addr ) {
+        printf("Out-of-range memory read of %u byte(s) at 0x%08x\n", size, addr);
+        return 0;
+    }
 
     // Simple memory read implementation
     uint32_t value = 0;
@@ -142,6 +146,11 @@ uint32_t mem_read(uint8_t* mem, uint32_t addr, uint32_t size) {
 
 void mem_write(uint8_t* mem, uint32_t addr, uint32_t data, uint32_t size) {
     mem_write_reqs++;
+
+    if ( addr >= MEM_ARENA_BYTES || size > MEM_ARENA_BYTES - addr ) {
+        printf("Out-of-range memory write of %u byte(s) at 0x%08x\n", size, addr);
+        return;
+    }
 
     switch(size) {
         case 1: // byte

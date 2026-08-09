@@ -13,8 +13,76 @@ let win = null;
 let child = null;
 let extractedEmulatorPath = null;
 
+// The renderer may only read/write inside the app directory and directories the
+// user explicitly picked through a dialog.
+const allowedRoots = new Set();
+
+function appRootPath() {
+    return app.isPackaged ? app.getAppPath() : __dirname;
+}
+
+function registerAllowedRoot(dir) {
+    if (!dir) return;
+    allowedRoots.add(path.resolve(dir));
+}
+
+function isPathAllowed(candidate) {
+    const resolved = path.resolve(candidate);
+    const roots = [appRootPath(), ...allowedRoots];
+    if (app.isPackaged) {
+        // Resources live next to app.asar in a packaged build.
+        roots.push(path.dirname(appRootPath()));
+    }
+
+    return roots.some((root) => {
+        const resolvedRoot = path.resolve(root);
+        return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + path.sep);
+    });
+}
+
+function resolveWorkspacePath(filePath) {
+    const resolved = path.isAbsolute(filePath)
+        ? path.resolve(filePath)
+        : path.resolve(appRootPath(), filePath);
+
+    if (!isPathAllowed(resolved)) {
+        throw new Error(`Access denied outside the workspace: ${resolved}`);
+    }
+    return resolved;
+}
+
+function sendToRenderer(channel, payload) {
+    if (win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
+        win.webContents.send(channel, payload);
+    }
+}
+
+function killChildProcess() {
+    if (!child) return;
+    const proc = child;
+    child = null;
+    try {
+        proc.kill("SIGKILL");
+    } catch {}
+}
+
 const COMMAND_TIMEOUT_MS = 2000;
+// "c" and "s<n>" can legitimately produce no output for a long time; a short
+// inactivity timeout would abandon them mid-run.
+const EXECUTION_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 const pendingCommandQueue = [];
+// Output belonging to commands we already gave up on must not be credited to the
+// next command's buffer.
+let abandonedCommandCount = 0;
+let drainBuffer = "";
+
+function commandTimeoutFor(command) {
+    const trimmed = String(command ?? "").trim();
+    if (trimmed === "" || trimmed === "c" || /^s\d*$/i.test(trimmed)) {
+        return EXECUTION_COMMAND_TIMEOUT_MS;
+    }
+    return COMMAND_TIMEOUT_MS;
+}
 
 function hasTrailingPrompt(buffer) {
     return buffer.endsWith(">> ");
@@ -40,7 +108,7 @@ function resetPendingCommandTimeout(entry) {
     }
     entry.timeout = setTimeout(() => {
         finalizePendingCommand(entry, { timedOut: true });
-    }, COMMAND_TIMEOUT_MS);
+    }, commandTimeoutFor(entry.command));
 }
 
 function removePendingEntry(entry) {
@@ -73,6 +141,20 @@ function finalizePendingCommand(entry, { timedOut = false, error = null } = {}) 
         return;
     }
 
+    if (timedOut) {
+        // A timeout is a failure, not a truncated success: callers must not parse
+        // the partial buffer as a register dump / memory dump / disassembly.
+        abandonedCommandCount++;
+        drainBuffer = "";
+        entry.resolve({
+            ok: false,
+            error: `Command "${entry.command}" timed out`,
+            output,
+            timedOut: true,
+        });
+        return;
+    }
+
     if (entry.hadStdErr) {
         const errorMessage = output.length > 0 ? output : "Command reported errors";
         entry.resolve({ ok: false, error: errorMessage, output, timedOut });
@@ -83,6 +165,9 @@ function finalizePendingCommand(entry, { timedOut = false, error = null } = {}) 
 }
 
 function flushPendingCommands({ errorMessage = null, exitCode = null } = {}) {
+    abandonedCommandCount = 0;
+    drainBuffer = "";
+
     while (pendingCommandQueue.length > 0) {
         const entry = pendingCommandQueue.shift();
         if (!entry) continue;
@@ -107,6 +192,23 @@ function flushPendingCommands({ errorMessage = null, exitCode = null } = {}) {
 }
 
 function handleEmulatorStreamChunk(chunk, { isError = false } = {}) {
+    // Swallow the tail of every abandoned command before crediting anything again.
+    while (abandonedCommandCount > 0 && chunk.length > 0) {
+        drainBuffer += chunk;
+        const promptIndex = drainBuffer.indexOf(">> ");
+        if (promptIndex === -1) {
+            return;
+        }
+        const consumed = promptIndex + 3;
+        chunk = drainBuffer.slice(consumed);
+        drainBuffer = "";
+        abandonedCommandCount--;
+    }
+
+    if (abandonedCommandCount > 0 || chunk.length === 0) {
+        return;
+    }
+
     if (!pendingCommandQueue.length) {
         return;
     }
@@ -194,7 +296,6 @@ function createWindow() {
             preload: path.join(__dirname, "preload.js"),
             contextIsolation: true,
             nodeIntegration: false,
-            webSecurity: false, // Allow module loading
         },
     });
 
@@ -202,6 +303,11 @@ function createWindow() {
     if (screenWidth >= 2560) {
         win.maximize();
     }
+
+    win.on("closed", () => {
+        win = null;
+        killChildProcess();
+    });
 
     win.loadFile(path.join(__dirname, "index.html"));
 }
@@ -214,7 +320,12 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
+    killChildProcess();
     if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", () => {
+    killChildProcess();
 });
 
 ipcMain.handle("pick-asm", async () => {
@@ -224,31 +335,25 @@ ipcMain.handle("pick-asm", async () => {
         filters: [{ name: "Assembly", extensions: ["s"] }],
     });
     if (res.canceled || res.filePaths.length === 0) return null;
+    registerAllowedRoot(path.dirname(res.filePaths[0]));
     return res.filePaths[0];
 });
 
 ipcMain.handle("build-emu", async () => {
     // Use app.getAppPath() for packaged apps, __dirname for development
     const appPath = app.isPackaged ? app.getAppPath() : __dirname;
-    // Check if emulator executable already exists
     const exe = path.join(appPath, "obj", "emulator");
     const isPackaged = app.isPackaged;
 
-    if (existsSync(exe)) {
-        // In packaged app or emulator already built, skip compilation
-        console.log("Emulator executable found, skipping compilation");
-        return {
-            code: 0,
-            out:
-                "✅ Emulator already compiled and ready to use.\n" +
-                (isPackaged
-                    ? "Build skipped in packaged application.\n"
-                    : "Build not needed - emulator already exists.\n"),
-        };
-    }
-
-    // If packaged but no emulator found, that's an error
+    // A packaged app ships a prebuilt binary and has no toolchain; in development
+    // always defer to the Makefile so an edited emulator.cpp actually takes effect.
     if (isPackaged) {
+        if (existsSync(exe)) {
+            return {
+                code: 0,
+                out: "✅ Emulator binary found.\nBuild skipped in packaged application.\n",
+            };
+        }
         const error =
             "❌ Emulator executable not found in packaged application. This is a packaging error.";
         console.error(error);
@@ -258,9 +363,8 @@ ipcMain.handle("build-emu", async () => {
         };
     }
 
-    // Only try to compile if in development environment
     return new Promise((resolve) => {
-        console.log("Attempting to compile emulator in development mode...");
+        console.log("Running make...");
         // Use app.getAppPath() for packaged apps, __dirname for development
         const appPath = app.isPackaged ? app.getAppPath() : __dirname;
         // Run make in the current directory where Makefile is located
@@ -351,36 +455,37 @@ ipcMain.handle("run-emu", async (_evt, asmPath) => {
 
         // For cwd, we need an actual directory, not app.asar
         const cwdPath = app.isPackaged ? path.dirname(appPath) : appPath;
-        child = spawn(exe, [absolutePath], { cwd: cwdPath });
-        child.stdout.setEncoding("utf8");
-        child.stderr.setEncoding("utf8");
+        const thisProc = spawn(exe, [absolutePath], { cwd: cwdPath });
+        child = thisProc;
+        thisProc.stdout.setEncoding("utf8");
+        thisProc.stderr.setEncoding("utf8");
 
-        child.stdout.on("data", (chunk) => {
+        thisProc.stdout.on("data", (chunk) => {
+            if (child !== thisProc) return;
             const text = chunk.toString();
             handleEmulatorStreamChunk(text);
-            console.log("Emulator stdout:", text);
-            win.webContents.send("emu-output", text);
+            sendToRenderer("emu-output", text);
         });
-        child.stderr.on("data", (chunk) => {
+        thisProc.stderr.on("data", (chunk) => {
+            if (child !== thisProc) return;
             const text = chunk.toString();
             handleEmulatorStreamChunk(text, { isError: true });
-            console.log("Emulator stderr:", text);
-            win.webContents.send("emu-output", text);
+            sendToRenderer("emu-output", text);
         });
-        child.on("error", (error) => {
+        thisProc.on("error", (error) => {
             console.error("Emulator process error:", error);
+            // A dying process must never clear a newly spawned one.
+            if (child !== thisProc) return;
             flushPendingCommands({ errorMessage: error?.message || "Emulator process error" });
-            win.webContents.send("emu-output", `Error: ${error.message}\n`);
+            sendToRenderer("emu-output", `Error: ${error.message}\n`);
             child = null;
         });
-        child.on("close", (code) => {
+        thisProc.on("close", (code) => {
             console.log(`Emulator process exited with code: ${code}`);
-            if (code !== 0) {
-                console.error(`Emulator failed with exit code ${code}`);
-            }
+            if (child !== thisProc) return;
             const errorMessage = code === 0 ? null : `Emulator exited with code ${code}`;
             flushPendingCommands({ errorMessage, exitCode: code });
-            win.webContents.send("emu-output", `\n[process exited with code ${code}]\n`);
+            sendToRenderer("emu-output", `\n[process exited with code ${code}]\n`);
             child = null;
         });
 
@@ -451,26 +556,20 @@ ipcMain.handle("stop-emu", async () => {
         }
 
         child = null;
+        flushPendingCommands({ errorMessage: "Emulator stopped" });
         return { ok: true, message: "Emulator stopped successfully" };
     } catch (error) {
         console.error("Error stopping emulator:", error);
         // Force cleanup even if there was an error
-        if (child) {
-            try {
-                child.kill("SIGKILL");
-            } catch {}
-            child = null;
-        }
+        killChildProcess();
+        flushPendingCommands({ errorMessage: "Emulator stopped" });
         return { ok: false, error: error.message };
     }
 });
 
 ipcMain.handle("read-file", async (_evt, filePath) => {
     try {
-        // Use app.getAppPath() for packaged apps, __dirname for development
-        const appPath = app.isPackaged ? app.getAppPath() : __dirname;
-        // Resolve relative paths from the app directory
-        const resolvedPath = path.isAbsolute(filePath) ? filePath : path.join(appPath, filePath);
+        const resolvedPath = resolveWorkspacePath(filePath);
 
         // Check if path exists and is a file (not a directory)
         const stats = await stat(resolvedPath);
@@ -488,10 +587,7 @@ ipcMain.handle("read-file", async (_evt, filePath) => {
 
 ipcMain.handle("save-file", async (_evt, filePath, content) => {
     try {
-        // Use app.getAppPath() for packaged apps, __dirname for development
-        const appPath = app.isPackaged ? app.getAppPath() : __dirname;
-        // Resolve relative paths from the app directory
-        const resolvedPath = path.isAbsolute(filePath) ? filePath : path.join(appPath, filePath);
+        const resolvedPath = resolveWorkspacePath(filePath);
         await writeFile(resolvedPath, content, "utf8");
         return { ok: true };
     } catch (error) {
@@ -510,6 +606,7 @@ ipcMain.handle("new-file", async (_evt, defaultName = "untitled.s", content = ""
     });
     if (res.canceled || !res.filePath) return null;
     const filePath = res.filePath;
+    registerAllowedRoot(path.dirname(filePath));
     try {
         await writeFile(filePath, content ?? "", "utf8");
         return filePath;
@@ -526,6 +623,7 @@ ipcMain.handle("pick-folder", async () => {
     });
     if (res.canceled || res.filePaths.length === 0) return null;
     const dir = res.filePaths[0];
+    registerAllowedRoot(dir);
     return dir;
 });
 
@@ -572,6 +670,10 @@ async function buildFileTree(dir, relBase = null) {
 ipcMain.handle("list-s-files", async (_evt, dir) => {
     try {
         const base = path.resolve(dir);
+        if (!isPathAllowed(base)) {
+            console.error("Refusing to list files outside the workspace:", base);
+            return [];
+        }
         const tree = await buildFileTree(base);
         return tree;
     } catch (e) {
@@ -580,10 +682,34 @@ ipcMain.handle("list-s-files", async (_evt, dir) => {
     }
 });
 
+ipcMain.handle("list-examples", async () => {
+    try {
+        const dir = path.join(appRootPath(), "examples");
+        const entries = await readdir(dir, { withFileTypes: true });
+        const names = new Set(entries.filter((e) => e.isFile()).map((e) => e.name));
+
+        return [...names]
+            .filter((name) => name.toLowerCase().endsWith(".s"))
+            .sort((a, b) => a.localeCompare(b))
+            .map((name) => {
+                const cName = `${name.slice(0, -2)}.c`;
+                return {
+                    name,
+                    assembly: `./examples/${name}`,
+                    c: names.has(cName) ? `./examples/${cName}` : null,
+                };
+            });
+    } catch (e) {
+        console.error("Failed to list examples:", e);
+        return [];
+    }
+});
+
 ipcMain.handle("open-path", async (_evt, p) => {
     try {
         if (!p) return { ok: false, error: "No path" };
-        await shell.openPath(p);
+        const resolved = resolveWorkspacePath(p);
+        await shell.openPath(resolved);
         return { ok: true };
     } catch (e) {
         return { ok: false, error: String(e) };

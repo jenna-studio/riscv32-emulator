@@ -6,6 +6,45 @@
 
 ---
 
+## Status — 2026-08-09, after remediation
+
+Phases 0 through 3 of the fix plan have been implemented, along with the
+documentation pass from Phase 5. The findings below are preserved as the record
+of what was wrong; line numbers refer to the code **as audited**, before the
+fixes, so they will no longer line up with the current tree.
+
+**Fixed and verified by execution:** A1–A7 (all Phase 0 critical items), A8, A9,
+A10, A11, A12, A14, A15, A16 and most of the "Minor (instruction set)" table;
+B1–B7 and the REPL minor items except the `inst:` off-by-one; C2.
+
+**Fixed, verified statically only** (the Electron UI could not be launched in the
+remediation environment — it fails to boot there on unmodified `HEAD` too, so
+this is a limitation of that environment rather than a regression): D1–D12, E1–E13.
+
+**Deliberately left open**, because each is a scope decision rather than a defect:
+
+- **C1 — the cache simulator is still not wired into the memory path.** It looks
+  like an intentionally unfinished exercise, so it was kept rather than deleted.
+  The misleading always-zero statistics it fed have been removed from the
+  emulator's output, and `cachesim.cpp` now says plainly that it is not
+  connected.
+- **D6/D7 — the call stack and symbol table are still derived client-side.**
+  The destructive part is gone (the `stack` probe that ran the program to
+  completion), but making them real needs new emulator commands — a backtrace
+  and a `sym` dump of the existing `labels[]` table.
+- **B3 — the disassembly opcode column is still placeholder data**, because the
+  assembler never encodes instructions.
+- **`.ascii`/`.asciiz`/`.string`** remain unimplemented; they need the parser's
+  global lowercasing removed first, which risks the label matching.
+- The `0x400000` disassembly fallback address, the `inst:` off-by-one, and
+  `stop-emu`'s fixed sleeps.
+
+Verification added: `run_examples.sh` runs all four examples plus
+`tests/isa_smoke.s` and fails loudly on a fault, a timeout, a wrong answer
+marker, or a wrong register value. All checks currently pass.
+
+---
+
 ## Executive summary
 
 The IDE shell is in much better shape than the thing it is a shell for. The editor, file management, syntax highlighting, terminal rendering, and panel layout all work. The **emulation core and the data pipeline between the core and the panels are substantially broken**, in ways that produce confidently-displayed wrong answers rather than visible errors.

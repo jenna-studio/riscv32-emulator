@@ -64,7 +64,7 @@
                         <option value="t">Binary</option>
                         <option value="c">Char</option>
                     </select>
-                    <input id="memLen" placeholder="16" size="4" title="Number of units">
+                    <input id="memLen" placeholder="16" size="4" title="Number of words">
                     <button id="memBtn" title="Examine memory">
                         <i class="fas fa-search"></i>
                         Mem
@@ -95,11 +95,11 @@
                         <i class="fas fa-step-forward"></i>
                         Step Into
                     </button>
-                    <button data-cmd="s100" title="Continue - Run 100 steps" class="debug-btn">
+                    <button data-cmd="c" title="Continue - run until the next breakpoint or program end" class="debug-btn">
                         <i class="fas fa-play"></i>
                         Continue
                     </button>
-                    <button data-cmd="r" title="Run program from beginning" class="debug-btn success">
+                    <button data-cmd="restart" title="Run program from beginning" class="debug-btn success">
                         <i class="fas fa-redo"></i>
                         Run
                     </button>
@@ -291,7 +291,7 @@
                         <div class="memory-container" id="memoryContainer">
                             <div class="memory-controls">
                                 <input id="memoryAddr" placeholder="0x1000" title="Memory address">
-                                <input id="memoryLen" placeholder="64" size="6" title="Number of bytes">
+                                <input id="memoryLen" placeholder="16" size="6" title="Number of words">
                                 <button id="memoryRefresh" title="Refresh memory view">
                                     <i class="fas fa-sync"></i>
                                     Refresh
