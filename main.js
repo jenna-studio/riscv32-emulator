@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, screen, shell } from "electron";
 import { spawn } from "child_process";
-import { readFile, writeFile, readdir, stat, copyFile, mkdir, chmod } from "fs/promises";
+import { readFile, writeFile, readdir, stat, copyFile, mkdir, chmod, rm } from "fs/promises";
 import { existsSync, mkdirSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -647,6 +647,15 @@ ipcMain.handle("pick-folder", async () => {
     return dir;
 });
 
+// Same set the open/save dialogs accept, so the workspace tree does not hide
+// files the user can otherwise open.
+const SOURCE_EXTENSIONS = [".s", ".asm", ".c", ".h"];
+
+function isSourceFileName(name) {
+    const lower = name.toLowerCase();
+    return SOURCE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
 async function buildFileTree(dir, relBase = null) {
     const base = relBase || dir;
     const entries = await readdir(dir, { withFileTypes: true });
@@ -667,7 +676,7 @@ async function buildFileTree(dir, relBase = null) {
                 children: children,
                 expanded: false,
             });
-        } else if (ent.isFile() && ent.name.toLowerCase().endsWith(".s")) {
+        } else if (ent.isFile() && isSourceFileName(ent.name)) {
             tree.push({
                 path: full,
                 name: ent.name,
@@ -722,6 +731,203 @@ ipcMain.handle("list-examples", async () => {
     } catch (e) {
         console.error("Failed to list examples:", e);
         return [];
+    }
+});
+
+// ---------------------------------------------------------------------------
+// C -> RISC-V assembly
+//
+// clang emits standard rv32 assembly; this emulator accepts a subset of it.
+// The rewrite below closes the gap: relocation syntax, unsupported pseudo
+// instructions, section names, and the halt convention.
+// ---------------------------------------------------------------------------
+
+const CLANG_CANDIDATES = [
+    "/opt/homebrew/opt/llvm/bin/clang",
+    "/usr/local/opt/llvm/bin/clang",
+    "clang",
+];
+
+const DROPPED_DIRECTIVES = new Set([
+    ".attribute",
+    ".file",
+    ".ident",
+    ".addrsig",
+    ".addrsig_sym",
+    ".type",
+    ".size",
+    ".option",
+    ".cfi_startproc",
+    ".cfi_endproc",
+]);
+
+const DATA_SECTION_PREFIXES = [".data", ".sdata", ".rodata", ".srodata", ".bss", ".sbss"];
+
+// Pseudo-instructions clang emits that the emulator does not implement.
+function expandPseudoInstruction(text) {
+    const match = text.match(/^([a-z][a-z0-9.]*)\s+(.*)$/);
+    if (!match) return text;
+
+    const op = match[1];
+    const a = match[2].split(/\s*,\s*/);
+
+    switch (op) {
+        case "blez": return `bge zero, ${a[0]}, ${a[1]}`;
+        case "bgez": return `bge ${a[0]}, zero, ${a[1]}`;
+        case "bltz": return `blt ${a[0]}, zero, ${a[1]}`;
+        case "bgtz": return `blt zero, ${a[0]}, ${a[1]}`;
+        case "bgtu": return `bltu ${a[1]}, ${a[0]}, ${a[2]}`;
+        case "bleu": return `bgeu ${a[1]}, ${a[0]}, ${a[2]}`;
+        case "seqz": return `sltiu ${a[0]}, ${a[1]}, 1`;
+        case "snez": return `sltu ${a[0]}, zero, ${a[1]}`;
+        case "sltz": return `slt ${a[0]}, ${a[1]}, zero`;
+        case "sgtz": return `slt ${a[0]}, zero, ${a[1]}`;
+        case "neg": return `sub ${a[0]}, zero, ${a[1]}`;
+        case "not": return `xori ${a[0]}, ${a[1]}, -1`;
+        case "sext.w": return `addi ${a[0]}, ${a[1]}, 0`;
+        case "tail": return `j ${a[0]}`;
+        default: return text;
+    }
+}
+
+function rewriteCompilerAssembly(asm, sourceName) {
+    const out = [
+        `# Generated from ${sourceName} by clang, rewritten for this emulator.`,
+        `# Edits here are overwritten the next time you generate.`,
+        "",
+        ".text",
+        "_start:",
+        "\tli sp, 0x10000",
+        "\tcall main",
+        "\thcf",
+        "",
+    ];
+
+    for (const rawLine of asm.split("\n")) {
+        const line = rawLine.replace(/#.*$/, "").trim();
+        if (!line) continue;
+
+        const first = line.split(/[\s,]+/)[0];
+        if (DROPPED_DIRECTIVES.has(first)) continue;
+
+        // Linkage aliases for merged globals ("inputs = .L_MergedGlobals+8").
+        // The code addresses the merged block directly, so these can go.
+        if (/^[A-Za-z_.$][\w.$]*\s*=/.test(line)) continue;
+
+        // ".comm sym, size, align" declares zeroed storage; spell it out.
+        const comm = line.match(/^\.l?comm\s+([\w.$]+)\s*,\s*(\d+)/);
+        if (comm) {
+            out.push(".data", `${comm[1]}:`, `\t.zero ${comm[2]}`);
+            continue;
+        }
+
+        if (first === ".section") {
+            const name = line.split(/[\s,]+/)[1] || "";
+            out.push(DATA_SECTION_PREFIXES.some((p) => name.startsWith(p)) ? ".data" : ".text");
+            continue;
+        }
+        if (first === ".text" || DATA_SECTION_PREFIXES.includes(first)) {
+            out.push(first === ".text" ? ".text" : ".data");
+            continue;
+        }
+
+        // The emulator's alignment directives take a single operand.
+        if (first === ".p2align" || first === ".align" || first === ".balign") {
+            out.push(`\t${first} ${line.split(/[\s,]+/)[1]}`);
+            continue;
+        }
+
+        // lui rd, %hi(sym) [+ addi rd, rd, %lo(sym)] is just "la rd, sym" here.
+        const hi = line.match(/^lui\s+(\w+),\s*%hi\((.+)\)$/);
+        if (hi) {
+            out.push(`\tla ${hi[1]}, ${hi[2]}`);
+            continue;
+        }
+        const loAddi = line.match(/^addi\s+(\w+),\s*(\w+),\s*%lo\((.+)\)$/);
+        if (loAddi) {
+            if (loAddi[1] !== loAddi[2]) out.push(`\tmv ${loAddi[1]}, ${loAddi[2]}`);
+            continue;
+        }
+        const loMem = line.match(/^(\w+)\s+(\w+),\s*%lo\((.+)\)\((\w+)\)$/);
+        if (loMem) {
+            out.push(`\t${loMem[1]} ${loMem[2]}, 0(${loMem[4]})`);
+            continue;
+        }
+
+        const expanded = expandPseudoInstruction(line);
+
+        // "L: j L" is how C spells a halt (for(;;);) - use the real instruction
+        // so the program stops instead of spinning.
+        const selfJump = expanded.match(/^j\s+(\S+)$/);
+        if (selfJump && out[out.length - 1]?.trim() === `${selfJump[1]}:`) {
+            out.push("\thcf");
+            continue;
+        }
+
+        out.push(expanded.endsWith(":") ? expanded : `\t${expanded}`);
+    }
+
+    return out.join("\n") + "\n";
+}
+
+function runClang(clang, args) {
+    return new Promise((resolve) => {
+        const proc = spawn(clang, args);
+        let stderr = "";
+        proc.stderr.on("data", (d) => (stderr += d.toString()));
+        proc.on("error", (e) => resolve({ code: -1, stderr: String(e) }));
+        proc.on("close", (code) => resolve({ code, stderr }));
+    });
+}
+
+ipcMain.handle("generate-asm", async (_evt, cPath) => {
+    let tempOut = null;
+    try {
+        const resolved = resolveWorkspacePath(cPath);
+        tempOut = path.join(os.tmpdir(), `rv32ide-${Date.now()}.s`);
+
+        const args = [
+            "--target=riscv32",
+            "-march=rv32i",
+            "-mabi=ilp32",
+            "-S",
+            "-O1",
+            "-fno-pic",
+            "-ffreestanding",
+            "-fno-builtin",
+            "-o",
+            tempOut,
+            resolved,
+        ];
+
+        let result = null;
+        for (const clang of CLANG_CANDIDATES) {
+            result = await runClang(clang, args);
+            if (result.code !== -1) break;
+        }
+
+        if (!result || result.code === -1) {
+            return {
+                ok: false,
+                error:
+                    "No clang with a RISC-V target found. Install LLVM (brew install llvm) " +
+                    "and try again.",
+            };
+        }
+        if (result.code !== 0) {
+            return { ok: false, error: result.stderr.trim() || `clang exited with ${result.code}` };
+        }
+
+        const generated = await readFile(tempOut, "utf8");
+        return { ok: true, asm: rewriteCompilerAssembly(generated, path.basename(resolved)) };
+    } catch (error) {
+        return { ok: false, error: String(error.message || error) };
+    } finally {
+        if (tempOut) {
+            try {
+                await rm(tempOut, { force: true });
+            } catch {}
+        }
     }
 });
 

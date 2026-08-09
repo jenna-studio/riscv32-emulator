@@ -1396,6 +1396,25 @@ body {
 .output-panel .cmdbar {
     padding: 8px 12px;
     min-height: 0;
+    align-items: stretch;
+}
+
+/* Send stacked over Clear, together as tall as the input */
+.cmdbar-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex-shrink: 0;
+    /* Stretch with the input so the stacked buttons stay the same height as it */
+    align-self: stretch;
+}
+
+.cmdbar-actions button {
+    flex: 1;
+    justify-content: center;
+    padding: 4px 12px;
+    min-height: 0;
+    font-size: 12px;
 }
 
 .panel-tabs {
@@ -2186,6 +2205,11 @@ input::placeholder {
 #cmd {
     flex: 1;
     font-family: "Fira Code", Menlo, "SF Mono", "Roboto Mono", Consolas, monospace;
+    /* Roughly four lines tall. A single-line input centres its text, so the
+       bottom padding pins the text and placeholder to the first line instead. */
+    min-height: 92px;
+    padding: 10px 14px 62px;
+    align-self: stretch;
 }
 
 #send {

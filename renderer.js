@@ -294,7 +294,7 @@ function showNotification(message, type = "info") {
 }
 
 function updateButtonStates() {
-    const { fileLoaded, emulatorRunning, editorDirty, cFileAvailable } = ideState;
+    const { fileLoaded, emulatorRunning, editorDirty } = ideState;
     const editorHasContent = currentEditor && currentEditor.getValue().length > 0;
 
     // Toolbar
@@ -309,7 +309,9 @@ function updateButtonStates() {
 
     // Editor bar
     document.getElementById("saveFile").disabled = !fileLoaded || !editorDirty;
-    document.getElementById("toggleView").disabled = !cFileAvailable;
+    // Enabled for any loaded file - toggleFileView creates the counterpart on
+    // demand, so there is nothing to gate on beyond having a file open.
+    document.getElementById("toggleView").disabled = !fileLoaded;
     document.getElementById("clearEditor").disabled = !editorHasContent;
     document.getElementById("formatCode").disabled = !fileLoaded;
 
@@ -1106,28 +1108,60 @@ async function initEditor() {
     console.log("✅ Monaco editor initialized");
 }
 
-function toggleFileView() {
+// Switching always works for a loaded file: when the counterpart does not exist
+// yet it is created from a template, so the button never dead-ends.
+async function ensureCounterpartFile(mode) {
+    if (filePaths[mode]) return true;
+
+    const known = filePaths.assembly || filePaths.c;
+    if (!known) {
+        showNotification("Load or create a file first.", "info");
+        return false;
+    }
+
+    const target = withExtension(known, mode === "c" ? ".c" : ".s");
+    if (!target || target === known) {
+        showNotification(`Cannot derive a ${mode === "c" ? "C" : "assembly"} file name.`, "error");
+        return false;
+    }
+
+    const template = mode === "c" ? C_TEMPLATE : ASSEMBLY_TEMPLATE;
+    let content = await readIfExists(target, known);
+
+    try {
+        if (content === null) {
+            await window.api.saveFile(target, template);
+            content = template;
+            showNotification(`Created: ${fileNameFromPath(target)}`, "success");
+        }
+    } catch (error) {
+        showNotification(`Failed to create ${fileNameFromPath(target)}: ${error.message}`, "error");
+        return false;
+    }
+
+    filePaths[mode] = target;
+    if (mode === "assembly") asmPath = target;
+    setModelContent(mode, content, ideState.editorDirty ? false : true);
+
+    ideState.cFileAvailable = Boolean(filePaths.assembly && filePaths.c);
+    updateButtonStates();
+    return true;
+}
+
+async function toggleFileView() {
     const toggleBtn = document.getElementById("toggleView");
     if (toggleBtn.disabled) return;
 
     const editorTitle = document.getElementById("editorTitle");
+    const nextMode = currentViewMode === "assembly" ? "c" : "assembly";
 
-    // Gate on the backing file, not its text - an empty (or cleared) counterpart
-    // is still a file worth switching to.
-    if (currentViewMode === "assembly") {
-        if (!filePaths.c) {
-            showNotification("No C file available for the current file.", "info");
-            return;
-        }
-        setEditorView("c");
+    if (!(await ensureCounterpartFile(nextMode))) return;
+
+    setEditorView(nextMode);
+    if (nextMode === "c") {
         toggleBtn.innerHTML = '<i class="fas fa-exchange-alt"></i> Switch to Assembly';
         editorTitle.textContent = "C Editor";
     } else {
-        if (!filePaths.assembly) {
-            showNotification("No assembly file available for the current file.", "info");
-            return;
-        }
-        setEditorView("assembly");
         toggleBtn.innerHTML = '<i class="fas fa-exchange-alt"></i> Switch to C';
         editorTitle.textContent = "Assembly Editor";
     }
@@ -1181,6 +1215,60 @@ async function readSiblingCFile(filePath) {
     const candidate = siblingCPath(filePath);
     const content = await readIfExists(candidate, filePath);
     return content === null ? null : { path: candidate, content };
+}
+
+const ASSEMBLY_TEMPLATE =
+    `# RISC-V assembly - placeholder.\n` +
+    `# Not generated from the C source; write the equivalent assembly here.\n` +
+    `.text\nstart:\n    li       sp, 0x10000\n    hcf\n`;
+// Placeholder only: the IDE pairs files by name, it does not translate between
+// assembly and C, so a generated counterpart says so rather than implying it
+// corresponds to the other view.
+const C_TEMPLATE =
+    `/* C counterpart - placeholder.\n` +
+    ` * Not generated from the assembly; write the equivalent C here. */\n` +
+    `int main(void) {\n    return 0;\n}\n`;
+
+// New files are created as an assembly/C pair so the editor always has both views.
+// An existing counterpart is adopted rather than overwritten.
+async function createFilePair(createdPath) {
+    const startedAsC = isCSourcePath(createdPath);
+    const counterpartPath = startedAsC
+        ? withExtension(createdPath, ".s")
+        : withExtension(createdPath, ".c");
+
+    const createdTemplate = startedAsC ? C_TEMPLATE : ASSEMBLY_TEMPLATE;
+    const counterpartTemplate = startedAsC ? ASSEMBLY_TEMPLATE : C_TEMPLATE;
+
+    // newFile always seeds the assembly template; fix it up if the user chose .c
+    if (startedAsC) {
+        await window.api.saveFile(createdPath, createdTemplate);
+    }
+
+    // A name with no extension has no counterpart to derive; keep it single-view.
+    if (!counterpartPath) {
+        return {
+            startedAsC,
+            assembly: startedAsC ? null : createdPath,
+            c: startedAsC ? createdPath : null,
+            assemblyContent: startedAsC ? "" : createdTemplate,
+            cContent: startedAsC ? createdTemplate : "",
+        };
+    }
+
+    let counterpartContent = await readIfExists(counterpartPath, createdPath);
+    if (counterpartContent === null) {
+        await window.api.saveFile(counterpartPath, counterpartTemplate);
+        counterpartContent = counterpartTemplate;
+    }
+
+    return {
+        startedAsC,
+        assembly: startedAsC ? counterpartPath : createdPath,
+        c: startedAsC ? createdPath : counterpartPath,
+        assemblyContent: startedAsC ? counterpartContent : createdTemplate,
+        cContent: startedAsC ? createdTemplate : counterpartContent,
+    };
 }
 
 // The assembly file that pairs with a .c/.h - the extension is unknown, so try each.
@@ -1402,6 +1490,12 @@ async function loadExampleFiles() {
     }
 }
 
+function createIcon(className) {
+    const icon = document.createElement("i");
+    icon.className = className;
+    return icon;
+}
+
 async function loadWorkspaceFiles() {
     const workspaceList = document.getElementById("workspaceList");
     if (!workspaceList || !currentWorkspaceFolder) return;
@@ -1419,7 +1513,8 @@ async function loadWorkspaceFiles() {
 
                 if (file.type === "directory") {
                     item.className = "folder-item";
-                    item.innerHTML = `<i class="fas fa-folder"></i> ${file.name}`;
+                    item.appendChild(createIcon("fas fa-folder"));
+                    item.appendChild(document.createTextNode(` ${file.name}`));
                     item.style.cursor = "pointer";
                     item.style.fontWeight = "bold";
 
@@ -1449,7 +1544,8 @@ async function loadWorkspaceFiles() {
                     }
                 } else if (file.type === "file") {
                     item.className = "file-item";
-                    item.innerHTML = `<i class="fas fa-file-code"></i> ${file.name}`;
+                    item.appendChild(createIcon("fas fa-file-code"));
+                    item.appendChild(document.createTextNode(` ${file.name}`));
                     item.style.cursor = "pointer";
 
                     item.addEventListener("click", async () => {
@@ -1727,30 +1823,49 @@ function setupButtonHandlers() {
 
     document.getElementById("newFile").addEventListener("click", async () => {
         if (!confirmDiscardUnsavedEdits("create a new file")) return;
-        const template = `# RISC-V Assembly\n.globl _start\n_start:\n    nop`;
-        const res = await window.api.newFile("untitled.s", template);
-        if (res) {
-            asmPath = res;
-            filePaths.assembly = res;
-            filePaths.c = null;
-            document.getElementById("asmLabel").textContent = fileNameFromPath(res);
+
+        // The dialog defaults to .s, but the user may name it .c; createFilePair
+        // rewrites the template when that happens.
+        const created = await window.api.newFile("untitled.s", ASSEMBLY_TEMPLATE);
+        if (!created) return;
+
+        try {
+            const pair = await createFilePair(created);
+
+            asmPath = pair.assembly;
+            filePaths.assembly = pair.assembly;
+            filePaths.c = pair.c;
+            document.getElementById("asmLabel").textContent = fileNameFromPath(created);
+
             if (monacoEditor) {
-                setModelContent("assembly", template);
-                setModelContent("c", "");
-                setEditorView("assembly");
+                setModelContent("assembly", pair.assemblyContent, true);
+                setModelContent("c", pair.cContent, true);
+                setEditorView(pair.startedAsC ? "c" : "assembly");
                 breakpoints.clear();
                 updateBreakpointDecorations();
             }
 
-            document.getElementById("editorTitle").textContent = "Assembly Editor";
-            document.getElementById("toggleView").innerHTML =
-                '<i class="fas fa-exchange-alt"></i> Switch to C';
+            const startedAsC = pair.startedAsC;
+            document.getElementById("editorTitle").textContent = startedAsC
+                ? "C Editor"
+                : "Assembly Editor";
+            document.getElementById("toggleView").innerHTML = startedAsC
+                ? '<i class="fas fa-exchange-alt"></i> Switch to Assembly'
+                : '<i class="fas fa-exchange-alt"></i> Switch to C';
 
+            const paired = Boolean(pair.assembly && pair.c);
             ideState.fileLoaded = true;
-            ideState.editorDirty = true; // New, unsaved file
-            ideState.cFileAvailable = false;
+            ideState.editorDirty = false; // the files were just written to disk
+            ideState.cFileAvailable = paired;
             updateButtonStates();
-            showNotification("New file created", "success");
+            showNotification(
+                paired
+                    ? `Created: ${fileNameFromPath(pair.assembly)} + ${fileNameFromPath(pair.c)}`
+                    : `Created: ${fileNameFromPath(created)}`,
+                "success"
+            );
+        } catch (error) {
+            showNotification(`Failed to create file pair: ${error.message}`, "error");
         }
     });
 
@@ -2073,6 +2188,9 @@ function setupButtonHandlers() {
         const toggle = document.getElementById("toggleSidebar");
         toggle.setAttribute("aria-expanded", String(!collapsed));
         toggle.title = collapsed ? "Expand file sidebar" : "Collapse file sidebar";
+        toggle.innerHTML = collapsed
+            ? '<i class="fas fa-chevron-right"></i>'
+            : '<i class="fas fa-chevron-left"></i>';
     });
 
     // Folder management
@@ -3427,6 +3545,15 @@ function formatRISCVAssembly(code) {
 
             if (trimmed.endsWith(":")) {
                 return comment ? `${trimmed}  ${comment}` : trimmed;
+            }
+
+            // Symbol assignment (e.g. "len = . - msg"): an expression, not an
+            // operand list - comma-joining its terms would corrupt it.
+            const assignment = trimmed.match(/^([A-Za-z_.$][\w.$]*)\s*=\s*(.*)$/);
+            if (assignment) {
+                const [, symbol, expression] = assignment;
+                const normalized = `${symbol} = ${expression.trim()}`;
+                return comment ? `${normalized}  ${comment}` : normalized;
             }
 
             const parts = trimmed.split(/\s+/);

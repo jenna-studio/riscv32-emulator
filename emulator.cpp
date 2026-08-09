@@ -352,6 +352,102 @@ int parse_data_element(int line, int size, uint8_t* mem, int offset) {
     return offset;
 }
 
+// The parser lowercases each line and cuts it at the first comment character, so
+// string literals have to come from an untouched copy of the source line.
+static char raw_line[1024];
+
+static void store_data_byte(int line, uint8_t* mem, int& offset, uint8_t value) {
+    if ( offset < 0 || offset >= MEM_BYTES ) {
+        print_syntax_error(line, "Data does not fit in memory");
+    }
+    mem[offset++] = value;
+}
+
+// .ascii / .asciz / .string : one or more comma-separated quoted literals.
+int parse_data_string(int line, uint8_t* mem, int offset, bool nul_terminate) {
+    const char* p = strchr(raw_line, '"');
+    if ( !p ) {
+        print_syntax_error(line, "Missing string literal");
+    }
+
+    while ( p && *p == '"' ) {
+        p++;
+        while ( *p && *p != '"' ) {
+            uint8_t value;
+            if ( *p == '\\' ) {
+                p++;
+                switch ( *p ) {
+                    case 'n': value = '\n'; p++; break;
+                    case 't': value = '\t'; p++; break;
+                    case 'r': value = '\r'; p++; break;
+                    case 'a': value = '\a'; p++; break;
+                    case 'b': value = '\b'; p++; break;
+                    case 'f': value = '\f'; p++; break;
+                    case 'v': value = '\v'; p++; break;
+                    case '0': case '1': case '2': case '3':
+                    case '4': case '5': case '6': case '7': {
+                        // Octal escape, 1-3 digits - what GAS emits for raw bytes.
+                        unsigned int v = 0;
+                        int digits = 0;
+                        while ( digits < 3 && *p >= '0' && *p <= '7' ) {
+                            v = v * 8 + (unsigned int)(*p - '0');
+                            p++;
+                            digits++;
+                        }
+                        value = (uint8_t)v;
+                        break;
+                    }
+                    case '\\': value = '\\'; p++; break;
+                    case '"': value = '"'; p++; break;
+                    case '\'': value = '\''; p++; break;
+                    case 'x': {
+                        p++;
+                        int digits = 0;
+                        unsigned int v = 0;
+                        while ( digits < 2 && isxdigit((unsigned char)*p) ) {
+                            char c = (char)tolower((unsigned char)*p);
+                            v = v * 16 + (unsigned int)(c <= '9' ? c - '0' : c - 'a' + 10);
+                            p++;
+                            digits++;
+                        }
+                        if ( digits == 0 ) {
+                            print_syntax_error(line, "Malformed \\x escape in string literal");
+                        }
+                        value = (uint8_t)v;
+                        break;
+                    }
+                    default:
+                        print_syntax_error(line, "Unknown escape in string literal");
+                }
+            } else {
+                value = (uint8_t)*p++;
+            }
+            store_data_byte(line, mem, offset, value);
+        }
+
+        if ( *p != '"' ) {
+            print_syntax_error(line, "Unterminated string literal");
+        }
+        p++;
+
+        if ( nul_terminate ) {
+            store_data_byte(line, mem, offset, 0);
+        }
+
+        while ( *p == ' ' || *p == '\t' ) p++;
+        if ( *p != ',' ) break;
+        p++;
+        while ( *p == ' ' || *p == '\t' ) p++;
+        if ( *p != '"' ) {
+            print_syntax_error(line, "Expected another string literal after ','");
+        }
+    }
+
+    // The rest of the line belongs to the literal, not to the token stream.
+    while ( strtok(NULL, " \t\r\n") ) ;
+    return offset;
+}
+
 int parse_data_zero(int line, uint8_t* mem, int offset) {
     char* t = strtok(NULL, " \t\r\n");
     if ( !t ) {
@@ -399,6 +495,9 @@ int parse_assembler_directive(int line, char* ftok, uint8_t* mem, int memoff) {
     else if ( streq(ftok, ".word") ) memoff = parse_data_element(line, 4, mem, memoff);
     else if ( streq(ftok, ".zero") || streq(ftok, ".space") || streq(ftok, ".skip") )
         memoff = parse_data_zero(line, mem, memoff);
+    else if ( streq(ftok, ".ascii") ) memoff = parse_data_string(line, mem, memoff, false);
+    else if ( streq(ftok, ".asciz") || streq(ftok, ".asciiz") || streq(ftok, ".string") )
+        memoff = parse_data_string(line, mem, memoff, true);
     else if ( streq(ftok, ".align") || streq(ftok, ".p2align") || streq(ftok, ".balign") ) {
         char* atok = strtok(NULL, " \t\r\n");
         if ( !atok ) {
@@ -781,6 +880,11 @@ void parse(FILE* fin, uint8_t* mem, instr* imem, int& memoff, label_loc* labels,
     while(!feof(fin)) {
         if ( !fgets(rbuf, 1024, fin) )
             break;
+
+        // Keep the line verbatim: string directives need original case and any
+        // comment character that happens to sit inside a literal.
+        strncpy(raw_line, rbuf, sizeof(raw_line) - 1);
+        raw_line[sizeof(raw_line) - 1] = '\0';
 
         // Strip inline comments (everything after #, ;, or //)
         for (char* p = rbuf; *p; ++p) {

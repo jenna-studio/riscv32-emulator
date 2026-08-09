@@ -17,5 +17,6 @@ contextBridge.exposeInMainWorld("api", {
     pickFolder: () => ipcRenderer.invoke("pick-folder"),
     listSFiles: (dir) => ipcRenderer.invoke("list-s-files", dir),
     listExamples: () => ipcRenderer.invoke("list-examples"),
+    generateAsm: (cPath) => ipcRenderer.invoke("generate-asm", cPath),
     openPath: (p) => ipcRenderer.invoke("open-path", p),
 });
