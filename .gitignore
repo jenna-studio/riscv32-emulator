@@ -22,3 +22,4 @@ electron-trace-test.log
 # backups files
 renderer.js.bak*
 emulator.cpp.bak*
+.claude/
