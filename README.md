@@ -141,7 +141,7 @@ Called out so nobody goes looking for them:
 
 -   **Step Into**: Execute one instruction at a time
 -   **Continue**: Run until the next breakpoint, a fault, or program exit
--   **Run**: Restart the program from the beginning and run it
+-   **Reload**: Restart the program at its initial state (breakpoints are kept and replayed)
 -   **Stop**: Halt execution
 
 ### Navigation
@@ -218,7 +218,7 @@ rather than corrupting memory.
 | Key | Action |
 | --- | --- |
 | `Ctrl+1` … `Ctrl+5` | Switch to Registers / Source / Disassembly / Memory / Statistics |
-| `F5` | Run |
+| `F5` | Reload |
 | `Shift+F5` | Stop |
 | `F10` | Step Into |
 | `Esc` | Focus the command box |

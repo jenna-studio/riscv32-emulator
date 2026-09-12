@@ -66,6 +66,31 @@ function killChildProcess() {
     } catch {}
 }
 
+// `proc.killed` only records that a signal was *sent*, not that the process
+// died, so it can never gate an escalation. exitCode/signalCode are the fields
+// that actually flip once the process is reaped.
+function isProcessAlive(proc) {
+    return Boolean(proc) && proc.exitCode === null && proc.signalCode === null;
+}
+
+function waitForExit(proc, timeoutMs) {
+    if (!isProcessAlive(proc)) return Promise.resolve(true);
+
+    return new Promise((resolve) => {
+        let settled = false;
+        const finish = (exited) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            proc.removeListener("exit", onExit);
+            resolve(exited);
+        };
+        const onExit = () => finish(true);
+        const timer = setTimeout(() => finish(false), timeoutMs);
+        proc.once("exit", onExit);
+    });
+}
+
 const COMMAND_TIMEOUT_MS = 2000;
 // "c" and "s<n>" can legitimately produce no output for a long time; a short
 // inactivity timeout would abandon them mid-run.
@@ -496,12 +521,15 @@ ipcMain.handle("run-emu", async (_evt, asmPath) => {
             sendToRenderer("emu-output", `Error: ${error.message}\n`);
             child = null;
         });
-        thisProc.on("close", (code) => {
-            console.log(`Emulator process exited with code: ${code}`);
+        thisProc.on("close", (code, signal) => {
+            console.log(`Emulator process exited with code: ${code}, signal: ${signal}`);
             if (child !== thisProc) return;
-            const errorMessage = code === 0 ? null : `Emulator exited with code ${code}`;
+            // A signal death reports code === null; saying "code null" gives the
+            // renderer nothing it can match on.
+            const detail = code === null ? `signal ${signal}` : `code ${code}`;
+            const errorMessage = code === 0 ? null : `Emulator exited with ${detail}`;
             flushPendingCommands({ errorMessage, exitCode: code });
-            sendToRenderer("emu-output", `\n[process exited with code ${code}]\n`);
+            sendToRenderer("emu-output", `\n[process exited with ${detail}]\n`);
             child = null;
         });
 
@@ -547,32 +575,41 @@ ipcMain.handle("send-cmd", async (_evt, line) => {
 });
 
 ipcMain.handle("stop-emu", async () => {
-    if (!child) {
+    const proc = child;
+    if (!proc) {
         return { ok: true, message: "No emulator process running" };
     }
 
     try {
-        // First try to send quit command gracefully
-        if (child.stdin && !child.stdin.destroyed) {
-            child.stdin.write("q\n");
+        // Escalate only as far as needed, and wait for the process to actually
+        // be reaped at each step rather than for a fixed delay.
+        if (proc.stdin && !proc.stdin.destroyed) {
+            proc.stdin.write("q\n");
+        }
+        let exited = await waitForExit(proc, 500);
+
+        if (!exited) {
+            proc.kill("SIGTERM");
+            exited = await waitForExit(proc, 500);
         }
 
-        // Give it a moment to quit gracefully
-        await new Promise((resolve) => setTimeout(resolve, 500));
-
-        // If still running, force kill
-        if (child && !child.killed) {
-            child.kill("SIGTERM");
-
-            // Give it another moment, then force kill
-            await new Promise((resolve) => setTimeout(resolve, 500));
-            if (child && !child.killed) {
-                child.kill("SIGKILL");
-            }
+        if (!exited) {
+            proc.kill("SIGKILL");
+            exited = await waitForExit(proc, 1000);
         }
 
-        child = null;
         flushPendingCommands({ errorMessage: "Emulator stopped" });
+
+        if (!exited) {
+            // Keep the handle: dropping it here would orphan a live process
+            // with no way to reach it again, and "run-emu" must not pretend the
+            // slot is free.
+            const error = `Emulator process ${proc.pid} survived SIGKILL and is still running`;
+            console.error(error);
+            return { ok: false, error };
+        }
+
+        if (child === proc) child = null;
         return { ok: true, message: "Emulator stopped successfully" };
     } catch (error) {
         console.error("Error stopping emulator:", error);

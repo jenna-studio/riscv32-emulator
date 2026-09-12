@@ -299,7 +299,7 @@ function updateButtonStates() {
 
     // Toolbar
     document.getElementById("compileAndLoad").disabled = !fileLoaded || emulatorRunning;
-    document.getElementById("reload").disabled = !emulatorRunning;
+    document.getElementById("reload").disabled = !asmPath;
     document.getElementById("stop").disabled = !emulatorRunning;
 
     // Debug controls, which sit in the toolbar next to Stop
@@ -1992,24 +1992,56 @@ function setupButtonHandlers() {
         }
     });
 
+    // Reload restarts the loaded program from scratch, so the panels come back
+    // showing the state the file was first imported in: PC at the entry point,
+    // nothing retired, no stale highlighting. Breakpoints are deliberately kept
+    // and replayed - they belong to the file, not to the run.
     document.getElementById("reload").addEventListener("click", async () => {
-        if (document.getElementById("reload").disabled) return;
-        await window.api.stopEmu();
-        const runRes = await window.api.runEmu(asmPath);
-        if (runRes.ok) {
-            showNotification("Assembly reloaded!", "success");
-            await syncBreakpoints();
-            ideState.emulatorRunning = true;
+        const btn = document.getElementById("reload");
+        if (btn.disabled) return;
 
-            // Sync all panels after reload
-            setTimeout(async () => {
-                await syncAllPanels("reload");
-            }, 300);
-        } else {
-            showNotification("Failed to reload assembly", "error");
-            ideState.emulatorRunning = false;
+        if (!asmPath) {
+            showNotification("No assembly file to reload", "error");
+            return;
         }
-        updateButtonStates();
+
+        const originalText = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Reloading...';
+
+        try {
+            const stopRes = await window.api.stopEmu();
+            if (stopRes && stopRes.ok === false) {
+                // The previous process is still alive, so run-emu would refuse
+                // anyway. Say why instead of reporting a reload that never happened.
+                showNotification(`Cannot reload: ${stopRes.error}`, "error");
+                return;
+            }
+
+            ideState.emulatorRunning = false;
+            clearExecutionState();
+
+            const runRes = await window.api.runEmu(asmPath);
+            if (runRes.ok) {
+                ideState.emulatorRunning = true;
+                await syncBreakpoints();
+                showNotification("Reloaded - back at the initial state", "success");
+
+                // Sync all panels after reload
+                setTimeout(async () => {
+                    await syncAllPanels("reload");
+                }, 300);
+            } else {
+                showNotification(`Failed to reload: ${runRes.error || "Unknown error"}`, "error");
+                ideState.emulatorRunning = false;
+            }
+        } catch (error) {
+            showNotification(`Error reloading: ${error.message}`, "error");
+            ideState.emulatorRunning = false;
+        } finally {
+            btn.innerHTML = originalText;
+            updateButtonStates();
+        }
     });
 
     document.getElementById("stop").addEventListener("click", async () => {
@@ -3328,6 +3360,34 @@ function escapeHtml(text) {
 // Track current execution line
 let currentExecutionLine = null;
 
+// Everything that describes "where execution currently is". Both a file switch
+// and a reload have to drop it, or stale line highlighting, register diffs and
+// counters survive into a program that has not retired an instruction yet.
+function clearExecutionState() {
+    currentExecutionLine = null;
+    previousRegisterValues = {};
+    currentRegisterValues = {};
+    instructionTrace = [];
+    callStack = [];
+    callStackLog = [];
+    lastRenderedTraceCycle = -1;
+    window.stepCounter = 0;
+
+    performanceCounters = {
+        instructions: 0,
+        cycles: 0,
+        cacheHits: 0,
+        cacheMisses: 0,
+        branchPredictions: 0,
+        branchMispredictions: 0,
+    };
+
+    if (monacoEditor && window.currentLineDecorations) {
+        monacoEditor.deltaDecorations(window.currentLineDecorations, []);
+        window.currentLineDecorations = [];
+    }
+}
+
 // Reset function for switching files - clears all emulator state
 async function resetEmulatorState() {
     console.log("🔄 Resetting emulator state for new file...");
@@ -3339,27 +3399,13 @@ async function resetEmulatorState() {
         // Ignore errors when stopping (emulator might not be running)
     }
 
-    // Clear all execution state
-    currentExecutionLine = null;
-    previousRegisterValues = {};
-    currentRegisterValues = {};
-    instructionTrace = [];
-    callStack = [];
-    callStackLog = [];
+    // Clear all execution state. Unlike a reload, switching files also drops the
+    // breakpoints, which belong to the file being left behind.
+    clearExecutionState();
     conditionalBreakpoints.clear();
 
     // Reset IDE state flags
     ideState.emulatorRunning = false;
-
-    // Reset performance counters
-    performanceCounters = {
-        instructions: 0,
-        cycles: 0,
-        cacheHits: 0,
-        cacheMisses: 0,
-        branchPredictions: 0,
-        branchMispredictions: 0,
-    };
 
     // Clear all panels
     if (terminal) {
@@ -3429,7 +3475,6 @@ async function resetEmulatorState() {
     if (traceCount) {
         traceCount.textContent = "0";
     }
-    lastRenderedTraceCycle = -1;
 
     // Reset IDE state flags
     ideState.built = false;
@@ -3691,7 +3736,9 @@ window.api.onOutput((chunk) => {
         terminal.write(textChunk);
     }
 
-    const exitMatch = textChunk.match(/\[process exited with code\s*(-?\d+)\]/i);
+    // Signal deaths carry no exit code, so both spellings have to be accepted or
+    // a killed/crashed emulator leaves the UI stuck in the "running" state.
+    const exitMatch = textChunk.match(/\[process exited with (?:code\s*(-?\d+)|signal\s*(\w+))\]/i);
     if (exitMatch) {
         const parsedCode = Number.parseInt(exitMatch[1], 10);
         const exitCode = Number.isNaN(parsedCode) ? null : parsedCode;
