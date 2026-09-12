@@ -1,6 +1,41 @@
 # RISC-V 32-bit Emulator IDE
 
-A comprehensive RISC-V 32-bit processor emulator with an integrated development environment (IDE) built using Electron, featuring Monaco Editor and xterm.js for a modern debugging experience.
+A comprehensive RISC-V 32-bit processor emulator with an integrated development environment (IDE) built using Electron, featuring the Monaco Editor for a modern debugging experience.
+
+## Download
+
+Prebuilt packages are on the [releases page](https://github.com/jenna-studio/riscv32-emulator/releases). Monaco and the icon font are bundled, so the app works with no internet connection.
+
+| Platform | File |
+| --- | --- |
+| macOS (Apple Silicon + Intel) | `RISC-V Emulator IDE-1.0.0-universal.dmg` |
+| Windows x64 | `RISC-V Emulator IDE-1.0.0-win.zip` |
+| Linux x64 | `rv32emulator-ide-1.0.0.tar.gz` |
+
+### macOS: clearing the quarantine flag
+
+The app is **not signed with an Apple Developer ID**, so macOS quarantines it on
+download and reports that it "is damaged and can't be opened." It is not
+damaged. Open the DMG, drag the app to `/Applications`, then run:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/RISC-V Emulator IDE.app"
+```
+
+Alternatively, right-click the app and choose **Open**, then confirm.
+
+### Linux
+
+```bash
+tar xzf rv32emulator-ide-1.0.0.tar.gz
+./rv32emulator-ide-1.0.0/rv32emulator-ide
+```
+
+### Windows
+
+Unzip and run `RISC-V Emulator IDE.exe`. SmartScreen will warn about an
+unrecognized publisher because the build is unsigned; choose **More info ->
+Run anyway**.
 
 ## References
 
@@ -233,28 +268,32 @@ npm run dev
 
 ### Production Builds
 
-The build process automatically compiles the RISC-V emulator before packaging to ensure the latest version is included.
+Each platform script builds the matching C++ emulator binary first, then packages
+Electron around it.
 
 ```bash
-# Build for current platform (automatically runs prebuild)
-npm run build
-
-# Platform-specific builds (all include automatic prebuild)
-npm run build:mac    # macOS, unpacked app bundle
-npm run build:win    # Windows NSIS installer
-npm run build:linux  # Linux AppImage
+npm run build:mac    # universal DMG (arm64 + x86_64)
+npm run build:win    # Windows x64 zip
+npm run build:linux  # Linux x64 tar.gz
 ```
 
-### Build Process Details
+**Linux and Windows are cross-built in Docker**, so a full release can be cut
+from a Mac. Docker must be running for `build:win` and `build:linux`; the
+containers are pinned to `linux/amd64` because Docker on Apple Silicon would
+otherwise produce an aarch64 binary for an x64 package.
 
-Each build command includes these steps:
+Each release target wipes `obj/` first, so a binary left over from another
+platform can never be swept into the package by `asarUnpack`.
 
-1. **Prebuild**: Compiles the C++ emulator core (`make`)
-2. **Package**: Creates the Electron application bundle
+### Code signing
 
-Note that `build` and `build:mac` pass `--dir` to electron-builder, which
-produces an unpacked application directory rather than an installer. Drop
-`--dir` from the script in `package.json` to get a DMG.
+There is no Apple Developer ID certificate for this project, so macOS builds are
+**ad-hoc signed** (`scripts/adhoc-sign.cjs`). Ad-hoc signing is what lets the
+bundle launch on Apple Silicon at all; it does not satisfy Gatekeeper, which is
+why users must clear the quarantine attribute. The hook deliberately skips the
+per-architecture `-temp` staging directories, because `@electron/universal`
+requires byte-identical non-binary files across both slices and signing rewrites
+`_CodeSignature/CodeResources`.
 
 
 ## Architecture
@@ -324,7 +363,6 @@ to the repository yet.)
 -   [CPUlator Computer System Simulator](https://cpulator.01xz.net/?sys=rv32-spim) for reference and inspiration in RISC-V simulation design
 -   RISC-V Foundation for the excellent ISA specification
 -   Monaco Editor team for the powerful code editor
--   xterm.js team for the terminal emulator
 -   Electron team for the cross-platform framework
 -   Original repository contributors and maintainers
 

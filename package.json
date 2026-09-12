@@ -10,13 +10,9 @@
         "start": "electron .",
         "build-emu": "make",
         "dev": "electron . --enable-logging",
-        "prebuild": "npm run build-emu",
-        "build": "electron-builder --dir",
-        "build:mac": "npm run prebuild && electron-builder --mac --dir",
-        "build:win": "npm run prebuild && electron-builder --win",
-        "build:linux": "npm run prebuild && electron-builder --linux",
-        "dist": "npm run build",
-        "pack": "npm run prebuild && electron-builder --dir",
+        "build:mac": "make release-mac && electron-builder --mac",
+        "build:win": "make release-win && electron-builder --win",
+        "build:linux": "make release-linux && electron-builder --linux",
         "postinstall": "electron-builder install-app-deps"
     },
     "build": {
@@ -29,30 +25,61 @@
             "**/*",
             "!dist/**/*",
             "!node_modules/**/*",
-            "node_modules/monaco-editor/**/*",
-            "node_modules/@xterm/**/*"
+            "!**/*.bak*",
+            "!**/*.log",
+            "!EMULATOR_AUDIT.md",
+            "node_modules/monaco-editor/min/**/*",
+            "node_modules/monaco-editor/package.json",
+            "node_modules/@fortawesome/fontawesome-free/css/**/*",
+            "node_modules/@fortawesome/fontawesome-free/webfonts/**/*",
+            "node_modules/@fortawesome/fontawesome-free/package.json"
         ],
         "asarUnpack": [
             "obj/**/*"
         ],
         "mac": {
             "category": "public.app-category.developer-tools",
-            "target": "dmg"
+            "target": [
+                {
+                    "target": "dmg",
+                    "arch": [
+                        "universal"
+                    ]
+                }
+            ],
+            "icon": "icon.icns",
+            "identity": null
         },
         "win": {
-            "target": "nsis"
+            "target": [
+                {
+                    "target": "zip",
+                    "arch": [
+                        "x64"
+                    ]
+                }
+            ],
+            "icon": "icon.ico"
         },
         "linux": {
-            "target": "AppImage"
-        }
+            "target": [
+                {
+                    "target": "tar.gz",
+                    "arch": [
+                        "x64"
+                    ]
+                }
+            ],
+            "category": "Development"
+        },
+        "afterPack": "scripts/adhoc-sign.cjs"
     },
     "devDependencies": {
         "electron": "^32.0.0",
         "electron-builder": "^25.1.8"
     },
     "dependencies": {
-        "@xterm/addon-fit": "^0.10.0",
-        "@xterm/xterm": "^5.5.0",
+        "@fortawesome/fontawesome-free": "^7.3.1",
         "monaco-editor": "^0.50.0"
     }
 }

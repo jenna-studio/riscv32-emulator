@@ -5,23 +5,22 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RISC-V 32 Emulator IDE</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Monaco and Font Awesome ship inside the app. Nothing in this page may
+         reach the network: a released build has to work with no internet. -->
+    <link rel="stylesheet" href="./node_modules/@fortawesome/fontawesome-free/css/all.min.css">
     <link rel="stylesheet" href="./styles.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.0/min/vs/loader.min.js"></script>
+    <script src="./node_modules/monaco-editor/min/vs/loader.js"></script>
     <script>
-        const monacoCdnBase = "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.0/min";
+        const monacoBase = "./node_modules/monaco-editor/min";
 
         window.MonacoEnvironment = {
             getWorkerUrl: function () {
-                const workerSource = `self.MonacoEnvironment = { baseUrl: '${monacoCdnBase}/' };\n` +
-                    `importScripts('${monacoCdnBase}/vs/base/worker/workerMain.js');`;
-                const blob = new Blob([workerSource], { type: "text/javascript" });
-                return URL.createObjectURL(blob);
+                return `${monacoBase}/vs/base/worker/workerMain.js`;
             },
         };
 
         if (typeof require !== "undefined" && require.config) {
-            require.config({ paths: { vs: `${monacoCdnBase}/vs` } });
+            require.config({ paths: { vs: `${monacoBase}/vs` } });
         }
     </script>
 </head>

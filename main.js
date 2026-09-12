@@ -256,16 +256,20 @@ function handleEmulatorStreamChunk(chunk, { isError = false } = {}) {
     }
 }
 
+// The Windows cross-build produces emulator.exe; every other platform ships a
+// bare "emulator". Resolve the name once so all four lookups below agree.
+const EMULATOR_BIN = process.platform === "win32" ? "emulator.exe" : "emulator";
+
 async function extractEmulatorIfNeeded() {
     if (!app.isPackaged) {
         // In development, use the emulator directly
-        return path.join(__dirname, "obj", "emulator");
+        return path.join(__dirname, "obj", EMULATOR_BIN);
     }
 
     // In packaged app, use the unpacked binary directly
     // app.getAppPath() returns path to app.asar, so get parent directory for app.asar.unpacked
     const resourcesPath = path.dirname(app.getAppPath());
-    const unpackedEmulator = path.join(resourcesPath, "app.asar.unpacked", "obj", "emulator");
+    const unpackedEmulator = path.join(resourcesPath, "app.asar.unpacked", "obj", EMULATOR_BIN);
 
     if (existsSync(unpackedEmulator)) {
         console.log(`Using unpacked emulator: ${unpackedEmulator}`);
@@ -284,8 +288,8 @@ async function extractEmulatorIfNeeded() {
             mkdirSync(tempDir, { recursive: true });
         }
 
-        const sourceEmulator = path.join(app.getAppPath(), "obj", "emulator");
-        const targetEmulator = path.join(tempDir, "emulator");
+        const sourceEmulator = path.join(app.getAppPath(), "obj", EMULATOR_BIN);
+        const targetEmulator = path.join(tempDir, EMULATOR_BIN);
 
         // Copy emulator to temp location
         await copyFile(sourceEmulator, targetEmulator);
